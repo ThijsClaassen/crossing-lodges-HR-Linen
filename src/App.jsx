@@ -347,6 +347,7 @@ export default function App() {
   const [tab, setTab] = useState('dashboard')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [uniformEmployeeId, setUniformEmployeeId] = useState(null)
 
   const [employees, setEmployees] = useState([])
   const [suppliers, setSuppliers] = useState([])
@@ -574,6 +575,7 @@ export default function App() {
                 onAdd={addLocalEmployee}
                 onUpdate={updateLocalEmployee}
                 onRemove={removeLocalEmployee}
+                onSelectEmployee={setUniformEmployeeId}
               />
             )}
             {activeTab === 'uniforms' && (
@@ -583,7 +585,6 @@ export default function App() {
                 stockByItem={uniformStockByItem}
                 issues={uniformIssues}
                 employees={employees}
-                employeeById={employeeById}
                 suppliers={suppliers}
                 location={location}
                 onItemAdd={addLocalUniformItem}
@@ -591,7 +592,7 @@ export default function App() {
                 onItemRemove={removeLocalUniformItem}
                 onStockChange={upsertLocalUniformStock}
                 onIssuesAdd={addLocalUniformIssues}
-                onIssuesUpdate={updateLocalUniformIssues}
+                onSelectEmployee={setUniformEmployeeId}
               />
             )}
             {activeTab === 'linen' && (
@@ -645,6 +646,20 @@ export default function App() {
           </button>
         ))}
       </div>
+
+      {uniformEmployeeId && employeeById[uniformEmployeeId] && (
+        <EmployeeUniformModal
+          employee={employeeById[uniformEmployeeId]}
+          items={uniformItems}
+          stockByItem={uniformStockByItem}
+          issues={uniformIssues}
+          location={location}
+          onClose={() => setUniformEmployeeId(null)}
+          onStockChange={upsertLocalUniformStock}
+          onIssuesAdd={addLocalUniformIssues}
+          onIssuesUpdate={updateLocalUniformIssues}
+        />
+      )}
     </div>
   )
 }
@@ -805,7 +820,7 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, linenItems, line
 // Employees tab — Admin/HR Admin: master list, one lodge at a time.
 // ---------------------------------------------------------------------------
 
-function EmployeesTab({ employees, location, onAdd, onUpdate, onRemove }) {
+function EmployeesTab({ employees, location, onAdd, onUpdate, onRemove, onSelectEmployee }) {
   const [form, setForm] = useState({
     first_name: '',
     last_name: '',
@@ -887,6 +902,7 @@ function EmployeesTab({ employees, location, onAdd, onUpdate, onRemove }) {
           <thead>
             <tr>
               <th style={styles.th}>Name</th>
+              <th style={styles.th}>Uniforms</th>
               <th style={styles.th}>Position</th>
               <th style={styles.th}>Department</th>
               <th style={styles.th}>Start date</th>
@@ -901,6 +917,11 @@ function EmployeesTab({ employees, location, onAdd, onUpdate, onRemove }) {
               <tr key={e.id}>
                 <td style={styles.td}>
                   {e.first_name} {e.last_name}
+                </td>
+                <td style={styles.td}>
+                  <button style={styles.buttonGhost} onClick={() => onSelectEmployee(e.id)}>
+                    View items
+                  </button>
                 </td>
                 <td style={styles.td}>
                   <input
@@ -950,7 +971,7 @@ function EmployeesTab({ employees, location, onAdd, onUpdate, onRemove }) {
             ))}
             {employees.length === 0 && (
               <tr>
-                <td style={styles.td} colSpan={8}>
+                <td style={styles.td} colSpan={9}>
                   No employees yet — add one above.
                 </td>
               </tr>
@@ -974,7 +995,6 @@ function UniformsTab({
   stockByItem,
   issues,
   employees,
-  employeeById,
   suppliers,
   location,
   onItemAdd,
@@ -982,14 +1002,13 @@ function UniformsTab({
   onItemRemove,
   onStockChange,
   onIssuesAdd,
-  onIssuesUpdate,
+  onSelectEmployee,
 }) {
   const isAdmin = role === 'admin' || role === 'hradmin'
   const [itemForm, setItemForm] = useState({ name: '', category: 'Shirt', size: '', supplier_id: '' })
   const [savingItem, setSavingItem] = useState(false)
   const [issueForm, setIssueForm] = useState({ item_id: '', employee_id: '' })
   const [issuing, setIssuing] = useState(false)
-  const [showHistory, setShowHistory] = useState(false)
 
   async function addItem() {
     if (!itemForm.name.trim()) return
@@ -1049,63 +1068,6 @@ function UniformsTab({
     onStockChange(stockRow)
     setIssuing(false)
   }
-
-  async function replaceItem(issue) {
-    const stock = stockByItem[issue.item_id]
-    const [updatedOld] = await sb.update('hr_uniform_issues', { id: issue.id }, { status: 'broken', resolved_date: todayStr() })
-    const [newIssue] = await sb.insert('hr_uniform_issues', {
-      item_id: issue.item_id,
-      employee_id: issue.employee_id,
-      location_id: location,
-      status: 'issued',
-      issued_date: todayStr(),
-      replaces_issue_id: issue.id,
-    })
-    const [stockRow] = await sb.upsert(
-      'hr_uniform_stock',
-      {
-        item_id: issue.item_id,
-        location_id: location,
-        qty_on_hand: (stock?.qty_on_hand ?? 0) - 1,
-        min_units: stock?.min_units ?? 0,
-        max_units: stock?.max_units ?? 0,
-      },
-      'item_id,location_id'
-    )
-    onIssuesUpdate(updatedOld)
-    onIssuesAdd(newIssue)
-    onStockChange(stockRow)
-  }
-
-  async function returnItem(issue) {
-    const stock = stockByItem[issue.item_id]
-    const [updated] = await sb.update('hr_uniform_issues', { id: issue.id }, { status: 'returned', resolved_date: todayStr() })
-    const [stockRow] = await sb.upsert(
-      'hr_uniform_stock',
-      {
-        item_id: issue.item_id,
-        location_id: location,
-        qty_on_hand: (stock?.qty_on_hand ?? 0) + 1,
-        min_units: stock?.min_units ?? 0,
-        max_units: stock?.max_units ?? 0,
-      },
-      'item_id,location_id'
-    )
-    onIssuesUpdate(updated)
-    onStockChange(stockRow)
-  }
-
-  const itemName = (id) => {
-    const it = items.find((i) => i.id === id)
-    return it ? `${it.name}${it.size ? ` (${it.size})` : ''}` : 'Unknown item'
-  }
-  const empName = (id) => {
-    const e = employeeById[id]
-    return e ? `${e.first_name} ${e.last_name}` : 'Unknown'
-  }
-
-  const activeIssues = issues.filter((i) => i.status === 'issued')
-  const historyIssues = issues.filter((i) => i.status !== 'issued').slice(0, 30)
 
   return (
     <>
@@ -1189,87 +1151,47 @@ function UniformsTab({
       </div>
 
       <div style={styles.card}>
-        <div style={styles.cardTitle}>Currently issued ({activeIssues.length})</div>
+        <div style={styles.cardTitle}>Employees — {location}</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Click a name to see everything they've been issued, and to mark items broken/replaced or
+          returned.
+        </div>
         <div style={styles.tableWrap}>
         <table style={styles.table}>
           <thead>
             <tr>
               <th style={styles.th}>Employee</th>
-              <th style={styles.th}>Item</th>
-              <th style={styles.th}>Issued</th>
+              <th style={styles.th}>Currently has</th>
               <th style={styles.th}></th>
             </tr>
           </thead>
           <tbody>
-            {activeIssues.map((i) => (
-              <tr key={i.id}>
-                <td style={styles.td}>{empName(i.employee_id)}</td>
-                <td style={styles.td}>{itemName(i.item_id)}</td>
-                <td style={styles.td}>{i.issued_date}</td>
-                <td style={styles.td}>
-                  <div style={{ ...styles.row, gap: 4 }}>
-                    <button style={styles.buttonGhost} onClick={() => replaceItem(i)}>
-                      Broken — replace
+            {employees.map((e) => {
+              const count = issues.filter((i) => i.employee_id === e.id && i.status === 'issued').length
+              return (
+                <tr key={e.id}>
+                  <td style={styles.td}>
+                    {e.first_name} {e.last_name}
+                  </td>
+                  <td style={styles.tdNum}>{count}</td>
+                  <td style={styles.td}>
+                    <button style={styles.buttonGhost} onClick={() => onSelectEmployee(e.id)}>
+                      View items
                     </button>
-                    <button style={styles.buttonDanger} onClick={() => returnItem(i)}>
-                      Return
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {activeIssues.length === 0 && (
+                  </td>
+                </tr>
+              )
+            })}
+            {employees.length === 0 && (
               <tr>
-                <td style={styles.td} colSpan={4}>
-                  Nothing currently issued at this lodge.
+                <td style={styles.td} colSpan={3}>
+                  No employees yet — add them on the Employees tab.
                 </td>
               </tr>
             )}
           </tbody>
         </table>
         </div>
-      </div>
-
-      <div style={styles.card}>
-        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
-          <div style={styles.cardTitle}>History</div>
-          <button style={styles.buttonGhost} onClick={() => setShowHistory((s) => !s)}>
-            {showHistory ? 'Hide' : 'Show'}
-          </button>
-        </div>
-        {showHistory && (
-          <div style={styles.tableWrap}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Employee</th>
-                <th style={styles.th}>Item</th>
-                <th style={styles.th}>Status</th>
-                <th style={styles.th}>Resolved</th>
-              </tr>
-            </thead>
-            <tbody>
-              {historyIssues.map((i) => (
-                <tr key={i.id}>
-                  <td style={styles.td}>{empName(i.employee_id)}</td>
-                  <td style={styles.td}>{itemName(i.item_id)}</td>
-                  <td style={styles.td}>
-                    <span style={styles.badge(i.status === 'broken' ? 'bad' : 'good')}>{i.status}</span>
-                  </td>
-                  <td style={styles.td}>{i.resolved_date || '—'}</td>
-                </tr>
-              ))}
-              {historyIssues.length === 0 && (
-                <tr>
-                  <td style={styles.td} colSpan={4}>
-                    No history yet.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-          </div>
-        )}
       </div>
 
       {isAdmin && (
@@ -2205,5 +2127,184 @@ function ContractsTab({ employees, contracts, onAdd, onUpdate }) {
         )}
       </div>
     </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation popup — shown after Broken/Replace and Return actions so
+// it's obvious the action actually went through.
+// ---------------------------------------------------------------------------
+
+function ConfirmPopup({ message, onClose }) {
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.55)',
+        zIndex: 70,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+      }}
+      onClick={onClose}
+    >
+      <div style={{ ...styles.card, maxWidth: 300, textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontSize: 26, marginBottom: 6, color: colors.ok }}>✓</div>
+        <div style={{ fontSize: 14, marginBottom: 14 }}>{message}</div>
+        <button style={{ ...styles.button, width: '100%' }} onClick={onClose}>
+          OK
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Employee uniform detail — opened from either the Uniforms tab or the
+// Employees tab. Shows every item ever issued to this person, with
+// Broken/Replace and Return actions on whatever's currently issued.
+// ---------------------------------------------------------------------------
+
+function EmployeeUniformModal({ employee, items, stockByItem, issues, location, onClose, onStockChange, onIssuesAdd, onIssuesUpdate }) {
+  const [confirmMsg, setConfirmMsg] = useState(null)
+
+  const empIssues = useMemo(
+    () =>
+      issues
+        .filter((i) => i.employee_id === employee.id)
+        .sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
+    [issues, employee.id]
+  )
+
+  const itemName = (id) => {
+    const it = items.find((i) => i.id === id)
+    return it ? `${it.name}${it.size ? ` (${it.size})` : ''}` : 'Unknown item'
+  }
+
+  async function replaceItem(issue) {
+    const stock = stockByItem[issue.item_id]
+    const [updatedOld] = await sb.update('hr_uniform_issues', { id: issue.id }, { status: 'broken', resolved_date: todayStr() })
+    const [newIssue] = await sb.insert('hr_uniform_issues', {
+      item_id: issue.item_id,
+      employee_id: issue.employee_id,
+      location_id: location,
+      status: 'issued',
+      issued_date: todayStr(),
+      replaces_issue_id: issue.id,
+    })
+    const [stockRow] = await sb.upsert(
+      'hr_uniform_stock',
+      {
+        item_id: issue.item_id,
+        location_id: location,
+        qty_on_hand: (stock?.qty_on_hand ?? 0) - 1,
+        min_units: stock?.min_units ?? 0,
+        max_units: stock?.max_units ?? 0,
+      },
+      'item_id,location_id'
+    )
+    onIssuesUpdate(updatedOld)
+    onIssuesAdd(newIssue)
+    onStockChange(stockRow)
+    setConfirmMsg(`Marked broken — a replacement ${itemName(issue.item_id)} was issued to ${employee.first_name}.`)
+  }
+
+  async function returnItem(issue) {
+    const stock = stockByItem[issue.item_id]
+    const [updated] = await sb.update('hr_uniform_issues', { id: issue.id }, { status: 'returned', resolved_date: todayStr() })
+    const [stockRow] = await sb.upsert(
+      'hr_uniform_stock',
+      {
+        item_id: issue.item_id,
+        location_id: location,
+        qty_on_hand: (stock?.qty_on_hand ?? 0) + 1,
+        min_units: stock?.min_units ?? 0,
+        max_units: stock?.max_units ?? 0,
+      },
+      'item_id,location_id'
+    )
+    onIssuesUpdate(updated)
+    onStockChange(stockRow)
+    setConfirmMsg(`${itemName(issue.item_id)} returned to stock.`)
+  }
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.6)',
+        zIndex: 60,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{ ...styles.card, maxWidth: 600, width: '100%', maxHeight: '85vh', overflowY: 'auto' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
+          <div style={styles.cardTitle}>
+            {employee.first_name} {employee.last_name} — uniform items
+          </div>
+          <button style={styles.buttonGhost} onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div style={styles.tableWrap}>
+        <table style={styles.table}>
+          <thead>
+            <tr>
+              <th style={styles.th}>Item</th>
+              <th style={styles.th}>Status</th>
+              <th style={styles.th}>Issued</th>
+              <th style={styles.th}>Resolved</th>
+              <th style={styles.th}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {empIssues.map((i) => (
+              <tr key={i.id}>
+                <td style={styles.td}>{itemName(i.item_id)}</td>
+                <td style={styles.td}>
+                  <span style={styles.badge(i.status === 'issued' ? 'good' : i.status === 'broken' ? 'bad' : 'neutral')}>
+                    {i.status}
+                  </span>
+                </td>
+                <td style={styles.td}>{i.issued_date}</td>
+                <td style={styles.td}>{i.resolved_date || '—'}</td>
+                <td style={styles.td}>
+                  {i.status === 'issued' && (
+                    <div style={{ ...styles.row, gap: 4 }}>
+                      <button style={styles.buttonGhost} onClick={() => replaceItem(i)}>
+                        Broken — replace
+                      </button>
+                      <button style={styles.buttonDanger} onClick={() => returnItem(i)}>
+                        Return
+                      </button>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {empIssues.length === 0 && (
+              <tr>
+                <td style={styles.td} colSpan={5}>
+                  Nothing issued to this employee yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        </div>
+      </div>
+
+      {confirmMsg && <ConfirmPopup message={confirmMsg} onClose={() => setConfirmMsg(null)} />}
+    </div>
   )
 }
