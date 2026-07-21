@@ -26,11 +26,11 @@ create table if not exists hr_access (
 );
 
 -- ---------------------------------------------------------------------------
--- hr_employees — one shared list, each employee belongs to a lodge.
+-- hr_employees — ONE company-wide list. People work across lodges, so
+-- there's no per-location split here (unlike Linen, further down).
 -- ---------------------------------------------------------------------------
 create table if not exists hr_employees (
   id              uuid primary key default gen_random_uuid(),
-  location_id     text not null check (location_id in ('ZC', 'EC', 'SC')),
   first_name      text not null,
   last_name       text not null,
   position        text,
@@ -43,8 +43,6 @@ create table if not exists hr_employees (
   active          boolean not null default true,
   created_at      timestamptz not null default now()
 );
-
-create index if not exists idx_hr_employees_location on hr_employees(location_id);
 
 -- ---------------------------------------------------------------------------
 -- hr_suppliers — one shared list (not per-lodge), used by both uniforms
@@ -65,37 +63,39 @@ create table if not exists hr_suppliers (
 -- Uniforms
 -- ---------------------------------------------------------------------------
 
--- Shared catalog — one master list of uniform types/sizes across all lodges.
+-- Shared catalog — one master list of uniform types/sizes for the whole
+-- company. price feeds stock value, order value, and write-off value.
 create table if not exists hr_uniform_items (
   id            uuid primary key default gen_random_uuid(),
   name          text not null,               -- e.g. 'Polo Shirt'
   category      text not null default 'Other', -- e.g. Shirt, Pants, Shoes, Jacket, Apron
   size          text,                          -- e.g. 'M', 'XL', '9' — free text
+  price         numeric not null default 0,
   supplier_id   uuid references hr_suppliers(id) on delete set null,
   active        boolean not null default true,
   created_at    timestamptz not null default now()
 );
 
--- Current stock on hand per item per lodge (available, not yet issued).
+-- ONE company-wide stock pool per item — not split by lodge, since
+-- uniforms follow the employee, and employees aren't tied to one lodge.
 create table if not exists hr_uniform_stock (
   id            uuid primary key default gen_random_uuid(),
   item_id       uuid not null references hr_uniform_items(id) on delete cascade,
-  location_id   text not null check (location_id in ('ZC', 'EC', 'SC')),
   qty_on_hand   numeric not null default 0,
   min_units     numeric not null default 0,
   max_units     numeric not null default 0,
   updated_at    timestamptz not null default now(),
-  unique (item_id, location_id)
+  unique (item_id)
 );
 
 -- Per-employee issue history. "Replace" (broken) creates a new row and
 -- links back via replaces_issue_id; the broken one is retired, not
--- returned to stock. "Return" (good condition) puts it back in stock.
+-- returned to stock (it counts as a write-off, valued at the item's
+-- price). "Return" (good condition) puts it back in stock.
 create table if not exists hr_uniform_issues (
   id                  uuid primary key default gen_random_uuid(),
   item_id             uuid not null references hr_uniform_items(id) on delete cascade,
   employee_id         uuid not null references hr_employees(id) on delete cascade,
-  location_id         text not null check (location_id in ('ZC', 'EC', 'SC')),
   status              text not null default 'issued' check (status in ('issued', 'broken', 'returned')),
   issued_date         date not null default current_date,
   resolved_date       date,                      -- date it was marked broken/returned
@@ -105,18 +105,21 @@ create table if not exists hr_uniform_issues (
 );
 
 create index if not exists idx_hr_uniform_issues_employee on hr_uniform_issues(employee_id);
-create index if not exists idx_hr_uniform_issues_location on hr_uniform_issues(location_id, status);
+create index if not exists idx_hr_uniform_issues_status on hr_uniform_issues(status);
 
 -- ---------------------------------------------------------------------------
 -- Linen
 -- ---------------------------------------------------------------------------
 
 -- Shared catalog — duvets, pillow covers, towels, serviettes, gowns, etc.
+-- Stock itself is still per-lodge (see hr_linen_stock below) — Linen is
+-- the one part of this app that keeps a location split.
 create table if not exists hr_linen_items (
   id            uuid primary key default gen_random_uuid(),
   name          text not null,                 -- e.g. 'Duvet Cover'
   category      text not null default 'Other', -- e.g. Duvets, Pillow Covers, Towels, Serviettes, Gowns
   size          text,                           -- e.g. 'Queen', 'Bath', blank if not sized
+  price         numeric not null default 0,
   supplier_id   uuid references hr_suppliers(id) on delete set null,
   active        boolean not null default true,
   created_at    timestamptz not null default now()
@@ -191,24 +194,36 @@ alter table hr_linen_stock       enable row level security;
 alter table hr_linen_movements   enable row level security;
 alter table hr_contracts         enable row level security;
 
+-- drop-then-create so this script is safe to run more than once (Postgres
+-- has no "create policy if not exists").
+drop policy if exists allow_read_hr_access on hr_access;
 create policy allow_read_hr_access on hr_access
   for select using (true);
+drop policy if exists allow_all_hr_employees on hr_employees;
 create policy allow_all_hr_employees on hr_employees
   for all using (true) with check (true);
+drop policy if exists allow_all_hr_suppliers on hr_suppliers;
 create policy allow_all_hr_suppliers on hr_suppliers
   for all using (true) with check (true);
+drop policy if exists allow_all_hr_uniform_items on hr_uniform_items;
 create policy allow_all_hr_uniform_items on hr_uniform_items
   for all using (true) with check (true);
+drop policy if exists allow_all_hr_uniform_stock on hr_uniform_stock;
 create policy allow_all_hr_uniform_stock on hr_uniform_stock
   for all using (true) with check (true);
+drop policy if exists allow_all_hr_uniform_issues on hr_uniform_issues;
 create policy allow_all_hr_uniform_issues on hr_uniform_issues
   for all using (true) with check (true);
+drop policy if exists allow_all_hr_linen_items on hr_linen_items;
 create policy allow_all_hr_linen_items on hr_linen_items
   for all using (true) with check (true);
+drop policy if exists allow_all_hr_linen_stock on hr_linen_stock;
 create policy allow_all_hr_linen_stock on hr_linen_stock
   for all using (true) with check (true);
+drop policy if exists allow_all_hr_linen_movements on hr_linen_movements;
 create policy allow_all_hr_linen_movements on hr_linen_movements
   for all using (true) with check (true);
+drop policy if exists allow_all_hr_contracts on hr_contracts;
 create policy allow_all_hr_contracts on hr_contracts
   for all using (true) with check (true);
 

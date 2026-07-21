@@ -12,25 +12,37 @@ per-employee issue/replace/return history for uniforms.
 
 ## What's here
 
-- **Dashboard** (Admin+) — low-stock alerts for uniforms and linen, plus
-  (HR Admin only) contracts expiring within 60 days.
-- **Employees** (Admin+) — one list per lodge: name, position, department,
-  start date, contact details, status.
+- **Dashboard** (Admin+) — employee count, low-stock alerts for uniforms
+  and linen, total stock value (uniforms + linen), write-offs for the
+  selected year (broken uniforms, lost/damaged linen) with count and
+  rand value, plus (HR Admin only) contracts expiring within 60 days.
+- **Employees** (Admin+) — **one company-wide list**, not split by lodge —
+  people work across all three properties, so there's a single record per
+  person: name, position, department, start date, contact details, status.
 - **Uniforms** (all roles) — a shared item catalog (add each size as its
-  own item, e.g. "Polo Shirt" size M and size L as two rows), per-lodge
-  stock levels, and three actions: **Issue** (assign to an employee, stock
-  -1), **Broken — replace** (retires the old one, issues a fresh one,
-  stock -1 again — the broken item does not return to available stock),
-  and **Return** (employee leaves or hands it back in good condition,
-  stock +1). Full history per employee.
-- **Linen** (all roles) — a shared item catalog (duvets, pillow covers,
-  towels, serviettes, gowns, broken down by size where it applies),
-  per-lodge stock levels, and a movement log (Received adds to stock; Lost,
-  Damaged, and Other all subtract).
+  own item, e.g. "Polo Shirt" size M and size L as two rows) with a price
+  per item, **one company-wide stock pool** (not per lodge — uniforms
+  follow the employee, and employees aren't tied to one lodge), and three
+  actions: **Issue** (assign to an employee, stock -1), **Broken —
+  replace** (retires the old one, issues a fresh one, stock -1 again — the
+  broken item does not return to available stock, and counts as a
+  write-off valued at the item's price), and **Return** (employee leaves
+  or hands it back in good condition, stock +1). Full history per
+  employee, with a stock-value column (price × on hand) on the stock
+  table.
+- **Linen** (all roles) — the one part of the app that still splits by
+  lodge, since linen physically lives at each property. A shared item
+  catalog (duvets, pillow covers, towels, serviettes, gowns, broken down
+  by size where it applies) with a price per item, a lodge switcher at the
+  top of the tab, per-lodge stock levels with a stock-value column, and a
+  movement log (Received adds to stock; Lost and Damaged both subtract and
+  count as write-offs; Other is a free adjustment).
 - **Suppliers** (Admin+) — one shared list (not per-lodge), used for both
   uniforms and linen.
 - **Orders** (Admin+) — low-stock uniforms and linen combined, grouped by
-  supplier, each with a Copy list button — same pattern as Beverage/Food.
+  supplier, each row priced (order qty × item price) with a per-supplier
+  and grand order-value total, plus a Copy list button per supplier — same
+  pattern as Beverage/Food.
 - **Contracts** (HR Admin only) — full history per employee: contract
   type, start/end date, salary, medical aid, pension fund. "Current"
   contract is whichever has the latest start date, not a separate status
@@ -58,18 +70,31 @@ today.
 
 ## 1. Database setup
 
+**If this is a fresh install** (nothing deployed yet):
+
 1. Open the Supabase SQL editor for the shared project
    (`https://arrendpmuwdhrfwvokhv.supabase.co`).
 2. Run `supabase/schema.sql` — creates all `hr_*` tables with the same
    open `allow_all` RLS style the other apps use (`hr_access` is
-   read-only from the client).
+   read-only from the client). This version already has the company-wide
+   employee/uniform model and item prices built in.
 3. **Change the three default passwords** immediately: Table Editor →
    `hr_access` → edit the `password` cell for `staff`, `admin`, and
    `hradmin` (they start as `ChangeMe-Staff1`, `ChangeMe-Admin1`,
    `ChangeMe-HRAdmin1`).
 4. There's no seed data this time — start by adding a few uniform/linen
-   catalog items and suppliers on their respective tabs, then add your
-   employees.
+   catalog items (with prices) and suppliers on their respective tabs,
+   then add your employees.
+
+**If you already deployed the earlier per-lodge version of this app**,
+run `supabase/migration_v2.sql` once in the SQL editor instead of the
+full schema. It: drops the lodge split from Employees and Uniforms,
+consolidates any existing per-lodge uniform stock into one row per item
+(summing quantities rather than discarding data), and adds a `price`
+column to both the uniform and linen item catalogs (defaults to 0 — go
+into Uniforms/Linen and fill in prices afterwards so the stock-value,
+order-value, and write-off figures on the Dashboard and Orders tab are
+accurate). It's safe to run on a live database with existing data.
 
 ## 2. Run locally / deploy
 
@@ -86,11 +111,22 @@ done — no environment variables needed since credentials are baked into
 
 ## Design notes worth knowing
 
-- **Item catalogs are shared across all three lodges** (one "Polo Shirt —
-  M" exists once), but **stock levels are tracked per lodge** — you
-  confirmed this since sizes/types are the same everywhere, only
-  quantities differ.
-- **Suppliers are one shared list**, not per-lodge, same reasoning.
+- **Employees, Uniforms, Suppliers, and Contracts are all company-wide**
+  — one list/pool, not split by lodge. People work across all three
+  properties, and uniforms are issued to a person, not a lodge, so
+  splitting them by location didn't reflect how the business actually
+  runs. This was a deliberate change from the app's first version, which
+  did split employees and uniform stock by lodge.
+- **Linen is the one exception** — it's tracked per lodge, since bedding
+  and towels physically live at each property and don't move around with
+  people. The Linen tab has its own lodge switcher at the top; every other
+  tab has none.
+- **Prices live on both item catalogs** (Uniforms and Linen), feeding
+  three budgeting figures: stock value (price × qty on hand, shown on
+  both stock tables and totalled on the Dashboard), order value (price ×
+  order qty, shown per line and totalled per supplier + grand total on
+  Orders), and write-off value (broken uniforms + lost/damaged linen,
+  valued at the item's price, filterable by year on the Dashboard).
 - **No barcode scanning** in this app — there's no natural fit for
   scanning staff or bedding the way there is for bottles and cans, so it
   wasn't carried over from Beverage/Food.

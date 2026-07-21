@@ -343,7 +343,6 @@ function LoginScreen({ onLogin }) {
 
 export default function App() {
   const { role, login, logout } = useAuth()
-  const [location, setLocation] = useState('ZC')
   const [tab, setTab] = useState('dashboard')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -354,6 +353,9 @@ export default function App() {
   const [uniformItems, setUniformItems] = useState([])
   const [uniformStock, setUniformStock] = useState([])
   const [uniformIssues, setUniformIssues] = useState([])
+  // Linen is the one part of this app that's still per-lodge — items and
+  // suppliers are shared, but stock/movements are loaded for ALL lodges at
+  // once here, and the Linen tab filters by its own local location switcher.
   const [linenItems, setLinenItems] = useState([])
   const [linenStock, setLinenStock] = useState([])
   const [linenMovements, setLinenMovements] = useState([])
@@ -364,14 +366,14 @@ export default function App() {
     setError(null)
     try {
       const base = [
-        sb.select('hr_employees', { location_id: location, active: true }, { order: 'first_name.asc' }),
+        sb.select('hr_employees', { active: true }, { order: 'first_name.asc' }),
         sb.select('hr_suppliers', { active: true }, { order: 'name.asc' }),
         sb.select('hr_uniform_items', { active: true }, { order: 'category.asc,name.asc' }),
-        sb.select('hr_uniform_stock', { location_id: location }, {}),
-        sb.select('hr_uniform_issues', { location_id: location }, { order: 'created_at.desc' }),
+        sb.select('hr_uniform_stock', {}, {}),
+        sb.select('hr_uniform_issues', {}, { order: 'created_at.desc' }),
         sb.select('hr_linen_items', { active: true }, { order: 'category.asc,name.asc' }),
-        sb.select('hr_linen_stock', { location_id: location }, {}),
-        sb.select('hr_linen_movements', { location_id: location }, { order: 'date.desc' }),
+        sb.select('hr_linen_stock', {}, {}),
+        sb.select('hr_linen_movements', {}, { order: 'date.desc' }),
       ]
       // Contracts hold salary/medical aid/pension — only ever fetched for the
       // HR Admin role, so that data never transits to a Staff/Admin session.
@@ -397,7 +399,7 @@ export default function App() {
   useEffect(() => {
     if (role) loadAll()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location, role])
+  }, [role])
 
   // ---------------------------------------------------------------------------
   // Local (optimistic) state updates — patch just the affected row(s) from
@@ -435,8 +437,8 @@ export default function App() {
   function upsertLocalUniformStock(rows) {
     const list = Array.isArray(rows) ? rows : [rows]
     setUniformStock((prev) => {
-      const map = new Map(prev.map((s) => [`${s.item_id}|${s.location_id}`, s]))
-      for (const row of list) map.set(`${row.item_id}|${row.location_id}`, row)
+      const map = new Map(prev.map((s) => [s.item_id, s]))
+      for (const row of list) map.set(row.item_id, row)
       return Array.from(map.values())
     })
   }
@@ -495,12 +497,6 @@ export default function App() {
     return map
   }, [uniformStock])
 
-  const linenStockByItem = useMemo(() => {
-    const map = {}
-    for (const s of linenStock) map[s.item_id] = s
-    return map
-  }, [linenStock])
-
   if (!role) {
     return <LoginScreen onLogin={login} />
   }
@@ -528,15 +524,6 @@ export default function App() {
             </button>
           </div>
         </div>
-        <div style={styles.row}>
-          <div style={styles.pillGroup}>
-            {LOCATIONS.map((l) => (
-              <button key={l.id} style={styles.pill(location === l.id, l.id)} onClick={() => setLocation(l.id)}>
-                {l.id}
-              </button>
-            ))}
-          </div>
-        </div>
       </div>
 
       <div style={styles.content}>
@@ -562,8 +549,10 @@ export default function App() {
                 role={role}
                 uniformItems={uniformItems}
                 uniformStockByItem={uniformStockByItem}
+                uniformIssues={uniformIssues}
                 linenItems={linenItems}
-                linenStockByItem={linenStockByItem}
+                linenStock={linenStock}
+                linenMovements={linenMovements}
                 employees={employees}
                 contracts={contracts}
               />
@@ -571,7 +560,6 @@ export default function App() {
             {activeTab === 'employees' && (role === 'admin' || role === 'hradmin') && (
               <EmployeesTab
                 employees={employees}
-                location={location}
                 onAdd={addLocalEmployee}
                 onUpdate={updateLocalEmployee}
                 onRemove={removeLocalEmployee}
@@ -586,7 +574,6 @@ export default function App() {
                 issues={uniformIssues}
                 employees={employees}
                 suppliers={suppliers}
-                location={location}
                 onItemAdd={addLocalUniformItem}
                 onItemUpdate={updateLocalUniformItem}
                 onItemRemove={removeLocalUniformItem}
@@ -599,10 +586,9 @@ export default function App() {
               <LinenTab
                 role={role}
                 items={linenItems}
-                stockByItem={linenStockByItem}
+                stock={linenStock}
                 movements={linenMovements}
                 suppliers={suppliers}
-                location={location}
                 onItemAdd={addLocalLinenItem}
                 onItemUpdate={updateLocalLinenItem}
                 onItemRemove={removeLocalLinenItem}
@@ -623,7 +609,7 @@ export default function App() {
                 uniformItems={uniformItems}
                 uniformStockByItem={uniformStockByItem}
                 linenItems={linenItems}
-                linenStockByItem={linenStockByItem}
+                linenStock={linenStock}
                 supplierById={supplierById}
               />
             )}
@@ -653,7 +639,6 @@ export default function App() {
           items={uniformItems}
           stockByItem={uniformStockByItem}
           issues={uniformIssues}
-          location={location}
           onClose={() => setUniformEmployeeId(null)}
           onStockChange={upsertLocalUniformStock}
           onIssuesAdd={addLocalUniformIssues}
@@ -675,9 +660,67 @@ function lowStockRows(items, stockByItem) {
     .filter((x) => x.stock && Number(x.stock.qty_on_hand) <= Number(x.stock.min_units))
 }
 
-function DashboardTab({ role, uniformItems, uniformStockByItem, linenItems, linenStockByItem, employees, contracts }) {
+// Linen stock has one row per item PER LODGE, so low-stock is evaluated
+// per (item, lodge) pair rather than per item.
+function lowStockRowsLinen(items, stock) {
+  const itemById = {}
+  for (const it of items) itemById[it.id] = it
+  return stock
+    .filter((s) => Number(s.qty_on_hand) <= Number(s.min_units) && itemById[s.item_id])
+    .map((s) => ({ item: itemById[s.item_id], stock: s }))
+}
+
+function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, linenItems, linenStock, linenMovements, employees, contracts }) {
+  const [writeOffYear, setWriteOffYear] = useState(new Date().getFullYear())
+
   const lowUniforms = useMemo(() => lowStockRows(uniformItems, uniformStockByItem), [uniformItems, uniformStockByItem])
-  const lowLinen = useMemo(() => lowStockRows(linenItems, linenStockByItem), [linenItems, linenStockByItem])
+  const lowLinen = useMemo(() => lowStockRowsLinen(linenItems, linenStock), [linenItems, linenStock])
+
+  const uniformStockValue = useMemo(
+    () => uniformItems.reduce((sum, it) => sum + Number(it.price || 0) * Number(uniformStockByItem[it.id]?.qty_on_hand ?? 0), 0),
+    [uniformItems, uniformStockByItem]
+  )
+
+  const linenItemById = useMemo(() => {
+    const map = {}
+    for (const it of linenItems) map[it.id] = it
+    return map
+  }, [linenItems])
+
+  const linenStockValue = useMemo(
+    () => linenStock.reduce((sum, s) => sum + Number(linenItemById[s.item_id]?.price || 0) * Number(s.qty_on_hand || 0), 0),
+    [linenStock, linenItemById]
+  )
+
+  const uniformItemById = useMemo(() => {
+    const map = {}
+    for (const it of uniformItems) map[it.id] = it
+    return map
+  }, [uniformItems])
+
+  const availableYears = useMemo(() => {
+    const years = new Set([new Date().getFullYear()])
+    for (const i of uniformIssues) if (i.status === 'broken' && i.resolved_date) years.add(new Date(i.resolved_date).getFullYear())
+    for (const m of linenMovements) if (m.date) years.add(new Date(m.date).getFullYear())
+    return Array.from(years).sort((a, b) => b - a)
+  }, [uniformIssues, linenMovements])
+
+  const uniformWriteOffs = useMemo(() => {
+    const rows = uniformIssues.filter(
+      (i) => i.status === 'broken' && i.resolved_date && new Date(i.resolved_date).getFullYear() === writeOffYear
+    )
+    const value = rows.reduce((sum, i) => sum + Number(uniformItemById[i.item_id]?.price || 0), 0)
+    return { count: rows.length, value }
+  }, [uniformIssues, uniformItemById, writeOffYear])
+
+  const linenWriteOffs = useMemo(() => {
+    const rows = linenMovements.filter(
+      (m) => (m.reason === 'Lost' || m.reason === 'Damaged') && m.date && new Date(m.date).getFullYear() === writeOffYear
+    )
+    const count = rows.reduce((sum, m) => sum + Math.abs(Number(m.qty_change || 0)), 0)
+    const value = rows.reduce((sum, m) => sum + Math.abs(Number(m.qty_change || 0)) * Number(linenItemById[m.item_id]?.price || 0), 0)
+    return { count, value }
+  }, [linenMovements, linenItemById, writeOffYear])
 
   const expiringSoon = useMemo(() => {
     if (role !== 'hradmin') return []
@@ -690,7 +733,7 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, linenItems, line
   return (
     <>
       <div style={styles.card}>
-        <div style={styles.cardTitle}>This lodge at a glance</div>
+        <div style={styles.cardTitle}>At a glance</div>
         <div style={{ ...styles.row, gap: 20 }}>
           <div>
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.goldLt }}>{employees.length}</div>
@@ -702,7 +745,52 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, linenItems, line
           </div>
           <div>
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.goldLt }}>{lowLinen.length}</div>
-            <div style={{ fontSize: 11, color: colors.muted }}>Linen items low on stock</div>
+            <div style={{ fontSize: 11, color: colors.muted }}>Linen items low on stock (any lodge)</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Stock value</div>
+        <div style={{ ...styles.row, gap: 20 }}>
+          <div>
+            <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.goldLt }}>R {fmt(uniformStockValue)}</div>
+            <div style={{ fontSize: 11, color: colors.muted }}>Uniforms (company-wide)</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.goldLt }}>R {fmt(linenStockValue)}</div>
+            <div style={{ fontSize: 11, color: colors.muted }}>Linen (all lodges combined)</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
+          <div style={styles.cardTitle}>Write-offs — for budgeting</div>
+          <select style={{ ...styles.smallInput, width: 90 }} value={writeOffYear} onChange={(e) => setWriteOffYear(Number(e.target.value))}>
+            {availableYears.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Uniforms: items marked broken and replaced this year. Linen: items logged as Lost or Damaged
+          this year. Both valued at the item's price.
+        </div>
+        <div style={{ ...styles.row, gap: 20 }}>
+          <div>
+            <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.danger }}>
+              {uniformWriteOffs.count} / R {fmt(uniformWriteOffs.value)}
+            </div>
+            <div style={{ fontSize: 11, color: colors.muted }}>Uniforms written off in {writeOffYear}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.danger }}>
+              {fmt(linenWriteOffs.count, 0)} / R {fmt(linenWriteOffs.value)}
+            </div>
+            <div style={{ fontSize: 11, color: colors.muted }}>Linen written off in {writeOffYear}</div>
           </div>
         </div>
       </div>
@@ -787,23 +875,25 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, linenItems, line
           <thead>
             <tr>
               <th style={styles.th}>Item</th>
+              <th style={styles.th}>Lodge</th>
               <th style={styles.th}>On hand</th>
               <th style={styles.th}>Min</th>
             </tr>
           </thead>
           <tbody>
             {lowLinen.map(({ item, stock }) => (
-              <tr key={item.id}>
+              <tr key={stock.id}>
                 <td style={styles.td}>
                   {item.name} {item.size ? `(${item.size})` : ''}
                 </td>
+                <td style={styles.td}>{stock.location_id}</td>
                 <td style={styles.tdNum}>{fmt(stock.qty_on_hand, 0)}</td>
                 <td style={styles.tdNum}>{fmt(stock.min_units, 0)}</td>
               </tr>
             ))}
             {lowLinen.length === 0 && (
               <tr>
-                <td style={styles.td} colSpan={3}>
+                <td style={styles.td} colSpan={4}>
                   All linen stock is above its minimum.
                 </td>
               </tr>
@@ -820,7 +910,7 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, linenItems, line
 // Employees tab — Admin/HR Admin: master list, one lodge at a time.
 // ---------------------------------------------------------------------------
 
-function EmployeesTab({ employees, location, onAdd, onUpdate, onRemove, onSelectEmployee }) {
+function EmployeesTab({ employees, onAdd, onUpdate, onRemove, onSelectEmployee }) {
   const [form, setForm] = useState({
     first_name: '',
     last_name: '',
@@ -835,7 +925,7 @@ function EmployeesTab({ employees, location, onAdd, onUpdate, onRemove, onSelect
   async function addEmployee() {
     if (!form.first_name.trim() || !form.last_name.trim()) return
     setSaving(true)
-    const [row] = await sb.insert('hr_employees', { ...form, location_id: location, status: 'Active' })
+    const [row] = await sb.insert('hr_employees', { ...form, status: 'Active' })
     setForm({ first_name: '', last_name: '', position: '', department: '', start_date: todayStr(), phone: '', email: '' })
     setSaving(false)
     onAdd(row)
@@ -854,7 +944,7 @@ function EmployeesTab({ employees, location, onAdd, onUpdate, onRemove, onSelect
   return (
     <>
       <div style={styles.card}>
-        <div style={styles.cardTitle}>Add employee — {location}</div>
+        <div style={styles.cardTitle}>Add employee</div>
         <div style={styles.formGrid}>
           <div>
             <label style={styles.label}>First name</label>
@@ -896,7 +986,7 @@ function EmployeesTab({ employees, location, onAdd, onUpdate, onRemove, onSelect
       </div>
 
       <div style={styles.card}>
-        <div style={styles.cardTitle}>{employees.length} employees — {location}</div>
+        <div style={styles.cardTitle}>{employees.length} employees</div>
         <div style={styles.tableWrap}>
         <table style={styles.table}>
           <thead>
@@ -996,7 +1086,6 @@ function UniformsTab({
   issues,
   employees,
   suppliers,
-  location,
   onItemAdd,
   onItemUpdate,
   onItemRemove,
@@ -1005,7 +1094,7 @@ function UniformsTab({
   onSelectEmployee,
 }) {
   const isAdmin = role === 'admin' || role === 'hradmin'
-  const [itemForm, setItemForm] = useState({ name: '', category: 'Shirt', size: '', supplier_id: '' })
+  const [itemForm, setItemForm] = useState({ name: '', category: 'Shirt', size: '', price: '', supplier_id: '' })
   const [savingItem, setSavingItem] = useState(false)
   const [issueForm, setIssueForm] = useState({ item_id: '', employee_id: '' })
   const [issuing, setIssuing] = useState(false)
@@ -1013,8 +1102,12 @@ function UniformsTab({
   async function addItem() {
     if (!itemForm.name.trim()) return
     setSavingItem(true)
-    const [row] = await sb.insert('hr_uniform_items', { ...itemForm, supplier_id: itemForm.supplier_id || null })
-    setItemForm({ name: '', category: 'Shirt', size: '', supplier_id: '' })
+    const [row] = await sb.insert('hr_uniform_items', {
+      ...itemForm,
+      price: Number(itemForm.price || 0),
+      supplier_id: itemForm.supplier_id || null,
+    })
+    setItemForm({ name: '', category: 'Shirt', size: '', price: '', supplier_id: '' })
     setSavingItem(false)
     onItemAdd(row)
   }
@@ -1033,12 +1126,11 @@ function UniformsTab({
     const stock = stockByItem[itemId]
     const payload = {
       item_id: itemId,
-      location_id: location,
       qty_on_hand: field === 'qty_on_hand' ? Number(value || 0) : stock?.qty_on_hand ?? 0,
       min_units: field === 'min_units' ? Number(value || 0) : stock?.min_units ?? 0,
       max_units: field === 'max_units' ? Number(value || 0) : stock?.max_units ?? 0,
     }
-    const [row] = await sb.upsert('hr_uniform_stock', payload, 'item_id,location_id')
+    const [row] = await sb.upsert('hr_uniform_stock', payload, 'item_id')
     onStockChange(row)
   }
 
@@ -1049,7 +1141,6 @@ function UniformsTab({
     const [issueRow] = await sb.insert('hr_uniform_issues', {
       item_id: issueForm.item_id,
       employee_id: issueForm.employee_id,
-      location_id: location,
       status: 'issued',
       issued_date: todayStr(),
     })
@@ -1057,12 +1148,11 @@ function UniformsTab({
       'hr_uniform_stock',
       {
         item_id: issueForm.item_id,
-        location_id: location,
         qty_on_hand: (stock?.qty_on_hand ?? 0) - 1,
         min_units: stock?.min_units ?? 0,
         max_units: stock?.max_units ?? 0,
       },
-      'item_id,location_id'
+      'item_id'
     )
     onIssuesAdd(issueRow)
     onStockChange(stockRow)
@@ -1075,8 +1165,8 @@ function UniformsTab({
         <div style={styles.card}>
           <div style={styles.cardTitle}>Add uniform item</div>
           <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-            Shared across all lodges — add each size as its own item (e.g. "Polo Shirt" size 'M' and
-            size 'L' as two separate rows).
+            One shared pool for the whole company — add each size as its own item (e.g. "Polo Shirt"
+            size 'M' and size 'L' as two separate rows).
           </div>
           <div style={styles.formGrid}>
             <div>
@@ -1096,6 +1186,15 @@ function UniformsTab({
             <div>
               <label style={styles.label}>Size</label>
               <input style={styles.input} value={itemForm.size} onChange={(e) => setItemForm({ ...itemForm, size: e.target.value })} />
+            </div>
+            <div>
+              <label style={styles.label}>Price</label>
+              <input
+                type="number"
+                style={styles.input}
+                value={itemForm.price}
+                onChange={(e) => setItemForm({ ...itemForm, price: e.target.value })}
+              />
             </div>
             <div>
               <label style={styles.label}>Supplier</label>
@@ -1120,7 +1219,7 @@ function UniformsTab({
       )}
 
       <div style={styles.card}>
-        <div style={styles.cardTitle}>Issue an item — {location}</div>
+        <div style={styles.cardTitle}>Issue an item</div>
         <div style={styles.formGrid}>
           <div>
             <label style={styles.label}>Employee</label>
@@ -1151,7 +1250,7 @@ function UniformsTab({
       </div>
 
       <div style={styles.card}>
-        <div style={styles.cardTitle}>Employees — {location}</div>
+        <div style={styles.cardTitle}>Employees</div>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
           Click a name to see everything they've been issued, and to mark items broken/replaced or
           returned.
@@ -1196,7 +1295,7 @@ function UniformsTab({
 
       {isAdmin && (
         <div style={styles.card}>
-          <div style={styles.cardTitle}>Stock levels — {location}</div>
+          <div style={styles.cardTitle}>Stock levels</div>
           <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
             "On hand" changes automatically when items are issued/replaced/returned — edit it directly
             here when new stock arrives from a supplier, or to correct a count.
@@ -1208,7 +1307,9 @@ function UniformsTab({
                 <th style={styles.th}>Item</th>
                 <th style={styles.th}>Category</th>
                 <th style={styles.th}>Supplier</th>
+                <th style={styles.th}>Price</th>
                 <th style={styles.th}>On hand</th>
+                <th style={styles.th}>Value</th>
                 <th style={styles.th}>Min</th>
                 <th style={styles.th}>Max</th>
                 <th style={styles.th}></th>
@@ -1217,6 +1318,7 @@ function UniformsTab({
             <tbody>
               {items.map((it) => {
                 const stock = stockByItem[it.id]
+                const value = Number(it.price || 0) * Number(stock?.qty_on_hand ?? 0)
                 return (
                   <tr key={it.id}>
                     <td style={styles.td}>
@@ -1247,10 +1349,19 @@ function UniformsTab({
                       <input
                         type="number"
                         style={styles.smallInput}
+                        defaultValue={it.price ?? 0}
+                        onBlur={(e) => updateItem(it.id, { price: Number(e.target.value) || 0 })}
+                      />
+                    </td>
+                    <td style={styles.td}>
+                      <input
+                        type="number"
+                        style={styles.smallInput}
                         defaultValue={stock?.qty_on_hand ?? 0}
                         onBlur={(e) => saveStock(it.id, 'qty_on_hand', e.target.value)}
                       />
                     </td>
+                    <td style={styles.tdNum}>R {fmt(value)}</td>
                     <td style={styles.td}>
                       <input
                         type="number"
@@ -1289,18 +1400,31 @@ function UniformsTab({
 // (Staff can log received/lost/damaged too).
 // ---------------------------------------------------------------------------
 
-function LinenTab({ role, items, stockByItem, movements, suppliers, location, onItemAdd, onItemUpdate, onItemRemove, onStockChange, onMovementAdd }) {
+function LinenTab({ role, items, stock, movements, suppliers, onItemAdd, onItemUpdate, onItemRemove, onStockChange, onMovementAdd }) {
   const isAdmin = role === 'admin' || role === 'hradmin'
-  const [itemForm, setItemForm] = useState({ name: '', category: 'Towels', size: '', supplier_id: '' })
+  const [location, setLocation] = useState('ZC')
+  const [itemForm, setItemForm] = useState({ name: '', category: 'Towels', size: '', price: '', supplier_id: '' })
   const [savingItem, setSavingItem] = useState(false)
   const [moveForm, setMoveForm] = useState({ item_id: '', qty: '', reason: 'Received', note: '' })
   const [logging, setLogging] = useState(false)
 
+  const stockByItem = useMemo(() => {
+    const map = {}
+    for (const s of stock) if (s.location_id === location) map[s.item_id] = s
+    return map
+  }, [stock, location])
+
+  const locationMovements = useMemo(() => movements.filter((m) => m.location_id === location), [movements, location])
+
   async function addItem() {
     if (!itemForm.name.trim()) return
     setSavingItem(true)
-    const [row] = await sb.insert('hr_linen_items', { ...itemForm, supplier_id: itemForm.supplier_id || null })
-    setItemForm({ name: '', category: 'Towels', size: '', supplier_id: '' })
+    const [row] = await sb.insert('hr_linen_items', {
+      ...itemForm,
+      price: Number(itemForm.price || 0),
+      supplier_id: itemForm.supplier_id || null,
+    })
+    setItemForm({ name: '', category: 'Towels', size: '', price: '', supplier_id: '' })
     setSavingItem(false)
     onItemAdd(row)
   }
@@ -1316,13 +1440,13 @@ function LinenTab({ role, items, stockByItem, movements, suppliers, location, on
   }
 
   async function saveStockField(itemId, field, value) {
-    const stock = stockByItem[itemId]
+    const s = stockByItem[itemId]
     const payload = {
       item_id: itemId,
       location_id: location,
-      qty_on_hand: field === 'qty_on_hand' ? Number(value || 0) : stock?.qty_on_hand ?? 0,
-      min_units: field === 'min_units' ? Number(value || 0) : stock?.min_units ?? 0,
-      max_units: field === 'max_units' ? Number(value || 0) : stock?.max_units ?? 0,
+      qty_on_hand: field === 'qty_on_hand' ? Number(value || 0) : s?.qty_on_hand ?? 0,
+      min_units: field === 'min_units' ? Number(value || 0) : s?.min_units ?? 0,
+      max_units: field === 'max_units' ? Number(value || 0) : s?.max_units ?? 0,
     }
     const [row] = await sb.upsert('hr_linen_stock', payload, 'item_id,location_id')
     onStockChange(row)
@@ -1340,15 +1464,15 @@ function LinenTab({ role, items, stockByItem, movements, suppliers, location, on
       reason: moveForm.reason,
       note: moveForm.note,
     })
-    const stock = stockByItem[moveForm.item_id]
+    const s = stockByItem[moveForm.item_id]
     const [stockRow] = await sb.upsert(
       'hr_linen_stock',
       {
         item_id: moveForm.item_id,
         location_id: location,
-        qty_on_hand: (stock?.qty_on_hand ?? 0) + qtyChange,
-        min_units: stock?.min_units ?? 0,
-        max_units: stock?.max_units ?? 0,
+        qty_on_hand: (s?.qty_on_hand ?? 0) + qtyChange,
+        min_units: s?.min_units ?? 0,
+        max_units: s?.max_units ?? 0,
       },
       'item_id,location_id'
     )
@@ -1365,12 +1489,27 @@ function LinenTab({ role, items, stockByItem, movements, suppliers, location, on
 
   return (
     <>
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Lodge</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Linen stock is tracked separately per lodge — everything else in this app (employees,
+          uniforms) is company-wide.
+        </div>
+        <div style={styles.pillGroup}>
+          {LOCATIONS.map((l) => (
+            <button key={l.id} style={styles.pill(location === l.id, l.id)} onClick={() => setLocation(l.id)}>
+              {l.id}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {isAdmin && (
         <div style={styles.card}>
           <div style={styles.cardTitle}>Add linen item</div>
           <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-            Shared across all lodges — add each size as its own item (e.g. "Duvet Cover" size 'Queen'
-            and size 'King' as two separate rows). Leave size blank if it doesn't apply.
+            Shared catalog across all lodges — add each size as its own item (e.g. "Duvet Cover" size
+            'Queen' and size 'King' as two separate rows). Leave size blank if it doesn't apply.
           </div>
           <div style={styles.formGrid}>
             <div>
@@ -1390,6 +1529,15 @@ function LinenTab({ role, items, stockByItem, movements, suppliers, location, on
             <div>
               <label style={styles.label}>Size (optional)</label>
               <input style={styles.input} value={itemForm.size} onChange={(e) => setItemForm({ ...itemForm, size: e.target.value })} />
+            </div>
+            <div>
+              <label style={styles.label}>Price</label>
+              <input
+                type="number"
+                style={styles.input}
+                value={itemForm.price}
+                onChange={(e) => setItemForm({ ...itemForm, price: e.target.value })}
+              />
             </div>
             <div>
               <label style={styles.label}>Supplier</label>
@@ -1468,7 +1616,7 @@ function LinenTab({ role, items, stockByItem, movements, suppliers, location, on
             </tr>
           </thead>
           <tbody>
-            {movements.slice(0, 30).map((m) => (
+            {locationMovements.slice(0, 30).map((m) => (
               <tr key={m.id}>
                 <td style={styles.td}>{m.date}</td>
                 <td style={styles.td}>{itemName(m.item_id)}</td>
@@ -1479,7 +1627,7 @@ function LinenTab({ role, items, stockByItem, movements, suppliers, location, on
                 <td style={styles.td}>{m.note || '—'}</td>
               </tr>
             ))}
-            {movements.length === 0 && (
+            {locationMovements.length === 0 && (
               <tr>
                 <td style={styles.td} colSpan={5}>
                   No movements logged yet.
@@ -1501,7 +1649,9 @@ function LinenTab({ role, items, stockByItem, movements, suppliers, location, on
                 <th style={styles.th}>Item</th>
                 <th style={styles.th}>Category</th>
                 <th style={styles.th}>Supplier</th>
+                <th style={styles.th}>Price</th>
                 <th style={styles.th}>On hand</th>
+                <th style={styles.th}>Value</th>
                 <th style={styles.th}>Min</th>
                 <th style={styles.th}>Max</th>
                 <th style={styles.th}></th>
@@ -1509,7 +1659,8 @@ function LinenTab({ role, items, stockByItem, movements, suppliers, location, on
             </thead>
             <tbody>
               {items.map((it) => {
-                const stock = stockByItem[it.id]
+                const s = stockByItem[it.id]
+                const value = Number(it.price || 0) * Number(s?.qty_on_hand ?? 0)
                 return (
                   <tr key={it.id}>
                     <td style={styles.td}>
@@ -1529,9 +1680,9 @@ function LinenTab({ role, items, stockByItem, movements, suppliers, location, on
                         onChange={(e) => updateItem(it.id, { supplier_id: e.target.value || null })}
                       >
                         <option value="">No supplier</option>
-                        {suppliers.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.name}
+                        {suppliers.map((s2) => (
+                          <option key={s2.id} value={s2.id}>
+                            {s2.name}
                           </option>
                         ))}
                       </select>
@@ -1540,15 +1691,24 @@ function LinenTab({ role, items, stockByItem, movements, suppliers, location, on
                       <input
                         type="number"
                         style={styles.smallInput}
-                        defaultValue={stock?.qty_on_hand ?? 0}
-                        onBlur={(e) => saveStockField(it.id, 'qty_on_hand', e.target.value)}
+                        defaultValue={it.price ?? 0}
+                        onBlur={(e) => updateItem(it.id, { price: Number(e.target.value) || 0 })}
                       />
                     </td>
                     <td style={styles.td}>
                       <input
                         type="number"
                         style={styles.smallInput}
-                        defaultValue={stock?.min_units ?? 0}
+                        defaultValue={s?.qty_on_hand ?? 0}
+                        onBlur={(e) => saveStockField(it.id, 'qty_on_hand', e.target.value)}
+                      />
+                    </td>
+                    <td style={styles.tdNum}>R {fmt(value)}</td>
+                    <td style={styles.td}>
+                      <input
+                        type="number"
+                        style={styles.smallInput}
+                        defaultValue={s?.min_units ?? 0}
                         onBlur={(e) => saveStockField(it.id, 'min_units', e.target.value)}
                       />
                     </td>
@@ -1556,7 +1716,7 @@ function LinenTab({ role, items, stockByItem, movements, suppliers, location, on
                       <input
                         type="number"
                         style={styles.smallInput}
-                        defaultValue={stock?.max_units ?? 0}
+                        defaultValue={s?.max_units ?? 0}
                         onBlur={(e) => saveStockField(it.id, 'max_units', e.target.value)}
                       />
                     </td>
@@ -1715,14 +1875,20 @@ function SuppliersTab({ suppliers, onAdd, onUpdate, onRemove }) {
 
 const UNASSIGNED_SUPPLIER = '__unassigned__'
 
-function OrdersTab({ uniformItems, uniformStockByItem, linenItems, linenStockByItem, supplierById }) {
+function orderQty(stock) {
+  return Math.max(Number(stock.max_units) - Number(stock.qty_on_hand), 0)
+}
+
+function OrdersTab({ uniformItems, uniformStockByItem, linenItems, linenStock, supplierById }) {
   const [copiedKey, setCopiedKey] = useState(null)
 
   const toOrder = useMemo(() => {
-    const uniforms = lowStockRows(uniformItems, uniformStockByItem).map((x) => ({ ...x, type: 'Uniform' }))
-    const linen = lowStockRows(linenItems, linenStockByItem).map((x) => ({ ...x, type: 'Linen' }))
+    const uniforms = lowStockRows(uniformItems, uniformStockByItem).map((x) => ({ ...x, type: 'Uniform', label: x.item.name }))
+    // Linen has one stock row per (item, lodge), so a single item can show
+    // up more than once here — once per lodge that's running low.
+    const linen = lowStockRowsLinen(linenItems, linenStock).map((x) => ({ ...x, type: 'Linen', label: `${x.item.name} — ${x.stock.location_id}` }))
     return [...uniforms, ...linen]
-  }, [uniformItems, uniformStockByItem, linenItems, linenStockByItem])
+  }, [uniformItems, uniformStockByItem, linenItems, linenStock])
 
   const groups = useMemo(() => {
     const map = {}
@@ -1730,11 +1896,15 @@ function OrdersTab({ uniformItems, uniformStockByItem, linenItems, linenStockByI
       const key = row.item.supplier_id || UNASSIGNED_SUPPLIER
       ;(map[key] ||= []).push(row)
     }
-    const rows = Object.entries(map).map(([key, groupRows]) => ({
-      key,
-      supplier: key === UNASSIGNED_SUPPLIER ? null : supplierById[key],
-      rows: groupRows,
-    }))
+    const rows = Object.entries(map).map(([key, groupRows]) => {
+      const value = groupRows.reduce((sum, r) => sum + orderQty(r.stock) * Number(r.item.price || 0), 0)
+      return {
+        key,
+        supplier: key === UNASSIGNED_SUPPLIER ? null : supplierById[key],
+        rows: groupRows,
+        value,
+      }
+    })
     rows.sort((a, b) => {
       if (a.key === UNASSIGNED_SUPPLIER) return 1
       if (b.key === UNASSIGNED_SUPPLIER) return -1
@@ -1743,9 +1913,11 @@ function OrdersTab({ uniformItems, uniformStockByItem, linenItems, linenStockByI
     return rows
   }, [toOrder, supplierById])
 
+  const grandTotal = useMemo(() => groups.reduce((sum, g) => sum + g.value, 0), [groups])
+
   async function copyGroup(group) {
     const text = group.rows
-      .map((r) => `${r.item.name}${r.item.size ? ` (${r.item.size})` : ''}\t${fmt(Number(r.stock.max_units) - Number(r.stock.qty_on_hand), 0)}`)
+      .map((r) => `${r.label}\t${fmt(orderQty(r.stock), 0)}\tR ${fmt(orderQty(r.stock) * Number(r.item.price || 0))}`)
       .join('\n')
 
     const flash = () => {
@@ -1785,15 +1957,18 @@ function OrdersTab({ uniformItems, uniformStockByItem, linenItems, linenStockByI
 
   return (
     <>
-      <div style={{ fontSize: 12, color: colors.muted, marginBottom: 4, padding: '0 2px' }}>
-        {toOrder.length} item{toOrder.length === 1 ? '' : 's'} to order across uniforms and linen,
-        grouped by supplier.
+      <div style={{ ...styles.row, justifyContent: 'space-between', marginBottom: 4, padding: '0 2px' }}>
+        <div style={{ fontSize: 12, color: colors.muted }}>
+          {toOrder.length} item{toOrder.length === 1 ? '' : 's'} to order across uniforms and linen,
+          grouped by supplier.
+        </div>
+        <div style={{ fontSize: 13, fontFamily: fonts.mono, color: colors.goldLt }}>Order total: R {fmt(grandTotal)}</div>
       </div>
       {groups.map((group) => (
         <div style={styles.card} key={group.key}>
           <div style={{ ...styles.row, justifyContent: 'space-between' }}>
             <div style={styles.cardTitle}>
-              {group.supplier ? group.supplier.name : 'Unassigned'} ({group.rows.length})
+              {group.supplier ? group.supplier.name : 'Unassigned'} ({group.rows.length}) — R {fmt(group.value)}
             </div>
             <button style={styles.buttonGhost} onClick={() => copyGroup(group)}>
               {copiedKey === group.key ? 'Copied!' : 'Copy list'}
@@ -1819,21 +1994,23 @@ function OrdersTab({ uniformItems, uniformStockByItem, linenItems, linenStockByI
                 <th style={styles.th}>Min</th>
                 <th style={styles.th}>Max</th>
                 <th style={styles.th}>Order qty</th>
+                <th style={styles.th}>Price</th>
+                <th style={styles.th}>Order value</th>
               </tr>
             </thead>
             <tbody>
-              {group.rows.map(({ item, stock, type }) => (
-                <tr key={item.id}>
-                  <td style={styles.td}>
-                    {item.name} {item.size ? `(${item.size})` : ''}
-                  </td>
+              {group.rows.map(({ item, stock, type, label }) => (
+                <tr key={stock.id}>
+                  <td style={styles.td}>{label}</td>
                   <td style={styles.td}>{type}</td>
                   <td style={styles.tdNum}>{fmt(stock.qty_on_hand, 0)}</td>
                   <td style={styles.tdNum}>{fmt(stock.min_units, 0)}</td>
                   <td style={styles.tdNum}>{fmt(stock.max_units, 0)}</td>
                   <td style={styles.td}>
-                    <strong>{fmt(Math.max(Number(stock.max_units) - Number(stock.qty_on_hand), 0), 0)}</strong>
+                    <strong>{fmt(orderQty(stock), 0)}</strong>
                   </td>
+                  <td style={styles.tdNum}>R {fmt(item.price || 0)}</td>
+                  <td style={styles.tdNum}>R {fmt(orderQty(stock) * Number(item.price || 0))}</td>
                 </tr>
               ))}
             </tbody>
@@ -2167,7 +2344,7 @@ function ConfirmPopup({ message, onClose }) {
 // Broken/Replace and Return actions on whatever's currently issued.
 // ---------------------------------------------------------------------------
 
-function EmployeeUniformModal({ employee, items, stockByItem, issues, location, onClose, onStockChange, onIssuesAdd, onIssuesUpdate }) {
+function EmployeeUniformModal({ employee, items, stockByItem, issues, onClose, onStockChange, onIssuesAdd, onIssuesUpdate }) {
   const [confirmMsg, setConfirmMsg] = useState(null)
 
   const empIssues = useMemo(
@@ -2189,7 +2366,6 @@ function EmployeeUniformModal({ employee, items, stockByItem, issues, location, 
     const [newIssue] = await sb.insert('hr_uniform_issues', {
       item_id: issue.item_id,
       employee_id: issue.employee_id,
-      location_id: location,
       status: 'issued',
       issued_date: todayStr(),
       replaces_issue_id: issue.id,
@@ -2198,12 +2374,11 @@ function EmployeeUniformModal({ employee, items, stockByItem, issues, location, 
       'hr_uniform_stock',
       {
         item_id: issue.item_id,
-        location_id: location,
         qty_on_hand: (stock?.qty_on_hand ?? 0) - 1,
         min_units: stock?.min_units ?? 0,
         max_units: stock?.max_units ?? 0,
       },
-      'item_id,location_id'
+      'item_id'
     )
     onIssuesUpdate(updatedOld)
     onIssuesAdd(newIssue)
@@ -2218,12 +2393,11 @@ function EmployeeUniformModal({ employee, items, stockByItem, issues, location, 
       'hr_uniform_stock',
       {
         item_id: issue.item_id,
-        location_id: location,
         qty_on_hand: (stock?.qty_on_hand ?? 0) + 1,
         min_units: stock?.min_units ?? 0,
         max_units: stock?.max_units ?? 0,
       },
-      'item_id,location_id'
+      'item_id'
     )
     onIssuesUpdate(updated)
     onStockChange(stockRow)
