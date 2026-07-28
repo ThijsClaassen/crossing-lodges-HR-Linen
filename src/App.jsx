@@ -450,6 +450,9 @@ export default function App() {
     const list = Array.isArray(rows) ? rows : [rows]
     setUniformIssues((prev) => prev.map((i) => list.find((r) => r.id === i.id) || i))
   }
+  function removeLocalUniformIssue(id) {
+    setUniformIssues((prev) => prev.filter((i) => i.id !== id))
+  }
 
   function addLocalLinenItem(row) {
     setLinenItems((prev) => [...prev, row])
@@ -635,6 +638,7 @@ export default function App() {
 
       {uniformEmployeeId && employeeById[uniformEmployeeId] && (
         <EmployeeUniformModal
+          role={role}
           employee={employeeById[uniformEmployeeId]}
           items={uniformItems}
           stockByItem={uniformStockByItem}
@@ -643,6 +647,7 @@ export default function App() {
           onStockChange={upsertLocalUniformStock}
           onIssuesAdd={addLocalUniformIssues}
           onIssuesUpdate={updateLocalUniformIssues}
+          onIssuesRemove={removeLocalUniformIssue}
         />
       )}
     </div>
@@ -1407,6 +1412,26 @@ function LinenTab({ role, items, stock, movements, suppliers, onItemAdd, onItemU
   const [savingItem, setSavingItem] = useState(false)
   const [moveForm, setMoveForm] = useState({ item_id: '', qty: '', reason: 'Received', note: '' })
   const [logging, setLogging] = useState(false)
+  const [addingCategory, setAddingCategory] = useState(false)
+  const [newCategoryText, setNewCategoryText] = useState('')
+
+  // Starter categories plus whatever's already in use on real items (so a
+  // category someone typed in last week shows up as a normal dropdown
+  // choice from then on) — always includes whatever's currently selected
+  // so the dropdown never shows blank right after adding a new one.
+  const categoryOptions = useMemo(() => {
+    const set = new Set(LINEN_CATEGORIES)
+    for (const it of items) if (it.category) set.add(it.category)
+    if (itemForm.category) set.add(itemForm.category)
+    return Array.from(set).sort()
+  }, [items, itemForm.category])
+
+  function confirmNewCategory() {
+    const v = newCategoryText.trim()
+    if (v) setItemForm((f) => ({ ...f, category: v }))
+    setAddingCategory(false)
+    setNewCategoryText('')
+  }
 
   const stockByItem = useMemo(() => {
     const map = {}
@@ -1518,13 +1543,51 @@ function LinenTab({ role, items, stock, movements, suppliers, onItemAdd, onItemU
             </div>
             <div>
               <label style={styles.label}>Category</label>
-              <select style={styles.input} value={itemForm.category} onChange={(e) => setItemForm({ ...itemForm, category: e.target.value })}>
-                {LINEN_CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
+              {addingCategory ? (
+                <div style={{ ...styles.row, gap: 4 }}>
+                  <input
+                    autoFocus
+                    style={styles.input}
+                    placeholder="New category name"
+                    value={newCategoryText}
+                    onChange={(e) => setNewCategoryText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        confirmNewCategory()
+                      }
+                    }}
+                  />
+                  <button style={styles.buttonGhost} onClick={confirmNewCategory}>
+                    Use
+                  </button>
+                  <button
+                    style={styles.buttonGhost}
+                    onClick={() => {
+                      setAddingCategory(false)
+                      setNewCategoryText('')
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <select
+                  style={styles.input}
+                  value={itemForm.category}
+                  onChange={(e) => {
+                    if (e.target.value === '__new__') setAddingCategory(true)
+                    else setItemForm({ ...itemForm, category: e.target.value })
+                  }}
+                >
+                  {categoryOptions.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                  <option value="__new__">+ Add new category…</option>
+                </select>
+              )}
             </div>
             <div>
               <label style={styles.label}>Size (optional)</label>
@@ -2344,8 +2407,10 @@ function ConfirmPopup({ message, onClose }) {
 // Broken/Replace and Return actions on whatever's currently issued.
 // ---------------------------------------------------------------------------
 
-function EmployeeUniformModal({ employee, items, stockByItem, issues, onClose, onStockChange, onIssuesAdd, onIssuesUpdate }) {
+function EmployeeUniformModal({ role, employee, items, stockByItem, issues, onClose, onStockChange, onIssuesAdd, onIssuesUpdate, onIssuesRemove }) {
   const [confirmMsg, setConfirmMsg] = useState(null)
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null)
+  const canDelete = role === 'hradmin'
 
   const empIssues = useMemo(
     () =>
@@ -2404,6 +2469,33 @@ function EmployeeUniformModal({ employee, items, stockByItem, issues, onClose, o
     setConfirmMsg(`${itemName(issue.item_id)} returned to stock.`)
   }
 
+  // HR Admin only — cleans up a mistaken entry (wrong item clicked, etc.).
+  // If the row being deleted is still "issued" (i.e. it was never actually
+  // resolved), the unit goes back into available stock since it was never
+  // really taken. Broken/returned rows are closed history — their stock
+  // effect already happened — so deleting those is just a display cleanup,
+  // no stock change.
+  async function deleteIssue(issue) {
+    if (issue.status === 'issued') {
+      const stock = stockByItem[issue.item_id]
+      const [stockRow] = await sb.upsert(
+        'hr_uniform_stock',
+        {
+          item_id: issue.item_id,
+          qty_on_hand: (stock?.qty_on_hand ?? 0) + 1,
+          min_units: stock?.min_units ?? 0,
+          max_units: stock?.max_units ?? 0,
+        },
+        'item_id'
+      )
+      onStockChange(stockRow)
+    }
+    await sb.remove('hr_uniform_issues', { id: issue.id })
+    onIssuesRemove(issue.id)
+    setConfirmDeleteId(null)
+    setConfirmMsg(`Removed ${itemName(issue.item_id)} from ${employee.first_name}'s history.`)
+  }
+
   return (
     <div
       style={{
@@ -2430,6 +2522,12 @@ function EmployeeUniformModal({ employee, items, stockByItem, issues, onClose, o
             Close
           </button>
         </div>
+        {canDelete && (
+          <div style={{ fontSize: 11, color: colors.muted, marginBottom: 8 }}>
+            As HR Admin you can delete a row here to clean up a mistaken entry — deleting a still-issued
+            item puts it back in available stock; deleting a closed (broken/returned) row is just cleanup.
+          </div>
+        )}
         <div style={styles.tableWrap}>
         <table style={styles.table}>
           <thead>
@@ -2453,16 +2551,33 @@ function EmployeeUniformModal({ employee, items, stockByItem, issues, onClose, o
                 <td style={styles.td}>{i.issued_date}</td>
                 <td style={styles.td}>{i.resolved_date || '—'}</td>
                 <td style={styles.td}>
-                  {i.status === 'issued' && (
-                    <div style={{ ...styles.row, gap: 4 }}>
-                      <button style={styles.buttonGhost} onClick={() => replaceItem(i)}>
-                        Broken — replace
-                      </button>
-                      <button style={styles.buttonDanger} onClick={() => returnItem(i)}>
-                        Return
-                      </button>
-                    </div>
-                  )}
+                  <div style={{ ...styles.row, gap: 4, flexWrap: 'wrap' }}>
+                    {i.status === 'issued' && (
+                      <>
+                        <button style={styles.buttonGhost} onClick={() => replaceItem(i)}>
+                          Broken — replace
+                        </button>
+                        <button style={styles.buttonDanger} onClick={() => returnItem(i)}>
+                          Return
+                        </button>
+                      </>
+                    )}
+                    {canDelete &&
+                      (confirmDeleteId === i.id ? (
+                        <>
+                          <button style={styles.buttonDanger} onClick={() => deleteIssue(i)}>
+                            Confirm delete?
+                          </button>
+                          <button style={styles.buttonGhost} onClick={() => setConfirmDeleteId(null)}>
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <button style={styles.buttonGhost} onClick={() => setConfirmDeleteId(i.id)}>
+                          Delete
+                        </button>
+                      ))}
+                  </div>
                 </td>
               </tr>
             ))}
