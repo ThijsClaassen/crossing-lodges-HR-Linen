@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { sb, LOCATIONS, UNIFORM_CATEGORIES, LINEN_CATEGORIES, MOVEMENT_REASONS, CONTRACT_TYPES } from './sb.js'
 import { colors, fonts } from './theme.js'
 
@@ -572,7 +572,7 @@ export default function App() {
 
   function upsertLocalScheduleLocation(row) {
     setScheduleLocations((prev) => {
-      const idx = prev.findIndex((s) => s.employee_id === row.employee_id && s.block_start_date === row.block_start_date)
+      const idx = prev.findIndex((s) => s.employee_id === row.employee_id && s.week_start_date === row.week_start_date)
       if (idx === -1) return [...prev, row]
       const copy = prev.slice()
       copy[idx] = row
@@ -1055,6 +1055,7 @@ function dayStatusColor(status) {
 function ScheduleTab({ employees, scheduleLocations, leave, onUpdateEmployee, onScheduleLocationChange }) {
   const today = parseDateOnly(todayStr())
   const [weekStart, setWeekStart] = useState(() => startOfWeek(today))
+  const [positionFilter, setPositionFilter] = useState('')
 
   const weeks = useMemo(
     () =>
@@ -1067,7 +1068,7 @@ function ScheduleTab({ employees, scheduleLocations, leave, onUpdateEmployee, on
 
   const locationByKey = useMemo(() => {
     const map = {}
-    for (const s of scheduleLocations) map[`${s.employee_id}|${s.block_start_date}`] = s
+    for (const s of scheduleLocations) map[`${s.employee_id}|${s.week_start_date}`] = s
     return map
   }, [scheduleLocations])
 
@@ -1076,23 +1077,215 @@ function ScheduleTab({ employees, scheduleLocations, leave, onUpdateEmployee, on
     return cycleStatusForDate(employee.cycle_anchor_date, date)
   }
 
+  function positionOf(employee) {
+    return employee.position?.trim() || 'No position set'
+  }
+
   async function saveAnchor(employeeId, value) {
     const [row] = await sb.update('hr_employees', { id: employeeId }, { cycle_anchor_date: value || null })
     onUpdateEmployee(row)
   }
 
-  async function saveBlockLocation(employeeId, blockStart, locationId) {
+  // Keyed by calendar week (Monday) rather than by working block — a lodge
+  // can now change week to week within the same 21-day stretch.
+  async function saveWeekLocation(employeeId, weekStartStr, locationId) {
     if (!locationId) return
     const [row] = await sb.upsert(
       'hr_schedule_locations',
-      { employee_id: employeeId, block_start_date: blockStart, location_id: locationId },
-      'employee_id,block_start_date'
+      { employee_id: employeeId, week_start_date: weekStartStr, location_id: locationId },
+      'employee_id,week_start_date'
     )
     onScheduleLocationChange(row)
   }
 
+  const positions = useMemo(() => Array.from(new Set(employees.map(positionOf))).sort(), [employees])
+
+  const groupedEmployees = useMemo(() => {
+    const pool = positionFilter ? employees.filter((e) => positionOf(e) === positionFilter) : employees
+    const groups = {}
+    for (const e of pool) (groups[positionOf(e)] ||= []).push(e)
+    return Object.entries(groups)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([position, list]) => ({
+        position,
+        list: list.slice().sort((a, b) => `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`)),
+      }))
+  }, [employees, positionFilter])
+
+  // Always across every employee (ignores the filter above) so this stays a
+  // full overview regardless of what the detailed grid below is filtered to.
+  const headcountByPosition = useMemo(() => {
+    const groups = {}
+    for (const e of employees) (groups[positionOf(e)] ||= []).push(e)
+    return Object.entries(groups)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([position, list]) => ({
+        position,
+        counts: weeks.map((w) => list.filter((e) => w.days.some((d) => dayInfo(e, d).status === 'on')).length),
+      }))
+  }, [employees, weeks, leave])
+
+  function renderDayStrip(e, w) {
+    const dayStatuses = w.days.map((d) => ({ date: d, ...dayInfo(e, d) }))
+    const hasOn = dayStatuses.some((d) => d.status === 'on')
+    const weekKey = fmtDateOnly(w.start)
+    const loc = locationByKey[`${e.id}|${weekKey}`]
+    return (
+      <td style={styles.td} key={weekKey}>
+        <div style={{ display: 'flex', gap: 2, marginBottom: hasOn ? 4 : 0 }}>
+          {dayStatuses.map((d, i) => (
+            <div
+              key={i}
+              title={`${fmtDateOnly(d.date)} — ${d.status}`}
+              style={{
+                width: 10,
+                height: 16,
+                borderRadius: 2,
+                background: dayStatusColor(d.status),
+                border: d.status === 'none' ? `1px dashed ${colors.border}` : 'none',
+              }}
+            />
+          ))}
+        </div>
+        {hasOn && (
+          <select
+            style={{ ...styles.smallInput, width: 68, padding: '3px 5px', fontSize: 11 }}
+            value={loc?.location_id || ''}
+            onChange={(ev) => saveWeekLocation(e.id, weekKey, ev.target.value)}
+          >
+            <option value="">—</option>
+            {LOCATIONS.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.id}
+              </option>
+            ))}
+          </select>
+        )}
+      </td>
+    )
+  }
+
   return (
     <>
+      <div style={styles.card}>
+        <div style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <div style={styles.cardTitle}>Weekly schedule</div>
+          <div style={{ ...styles.row, gap: 6 }}>
+            <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, -WEEKS_SHOWN * 7))}>
+              ← Earlier
+            </button>
+            <button style={styles.buttonGhost} onClick={() => setWeekStart(startOfWeek(today))}>
+              Today
+            </button>
+            <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, WEEKS_SHOWN * 7))}>
+              Later →
+            </button>
+          </div>
+        </div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Each strip is one week, Mon → Sun, one square per day. Green = working, grey = off, gold =
+          on leave. Pick a lodge for any working week and it applies to that whole week — it can be
+          changed week to week within the same rotation.
+        </div>
+        <div>
+          <label style={styles.label}>Filter by position</label>
+          <select style={{ ...styles.input, maxWidth: 220 }} value={positionFilter} onChange={(e) => setPositionFilter(e.target.value)}>
+            <option value="">All positions</option>
+            {positions.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Headcount by position</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          How many people of each position have at least one working day in that week.
+        </div>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Position</th>
+                {weeks.map((w) => (
+                  <th style={styles.th} key={fmtDateOnly(w.start)}>
+                    {w.start.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' })}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {headcountByPosition.map((row) => (
+                <tr key={row.position}>
+                  <td style={styles.td}>{row.position}</td>
+                  {row.counts.map((c, i) => (
+                    <td style={styles.tdNum} key={i}>
+                      {c}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+              {headcountByPosition.length === 0 && (
+                <tr>
+                  <td style={styles.td} colSpan={WEEKS_SHOWN + 1}>
+                    No employees yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Employee</th>
+                {weeks.map((w) => (
+                  <th style={styles.th} key={fmtDateOnly(w.start)}>
+                    {w.start.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' })}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {groupedEmployees.map((group) => (
+                <Fragment key={group.position}>
+                  <tr>
+                    <td
+                      style={{ ...styles.td, fontWeight: 700, color: colors.goldLt, background: 'rgba(184,147,90,0.08)' }}
+                      colSpan={WEEKS_SHOWN + 1}
+                    >
+                      {group.position} ({group.list.length})
+                    </td>
+                  </tr>
+                  {group.list.map((e) => (
+                    <tr key={e.id}>
+                      <td style={styles.td}>
+                        {e.first_name} {e.last_name}
+                      </td>
+                      {weeks.map((w) => renderDayStrip(e, w))}
+                    </tr>
+                  ))}
+                </Fragment>
+              ))}
+              {groupedEmployees.length === 0 && (
+                <tr>
+                  <td style={styles.td} colSpan={WEEKS_SHOWN + 1}>
+                    No employees yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <div style={styles.card}>
         <div style={styles.cardTitle}>Cycles</div>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
@@ -1137,95 +1330,6 @@ function ScheduleTab({ employees, scheduleLocations, leave, onUpdateEmployee, on
               {employees.length === 0 && (
                 <tr>
                   <td style={styles.td} colSpan={3}>
-                    No employees yet.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div style={styles.card}>
-        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
-          <div style={styles.cardTitle}>Weekly schedule</div>
-          <div style={{ ...styles.row, gap: 6 }}>
-            <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, -WEEKS_SHOWN * 7))}>
-              ← Earlier
-            </button>
-            <button style={styles.buttonGhost} onClick={() => setWeekStart(startOfWeek(today))}>
-              Today
-            </button>
-            <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, WEEKS_SHOWN * 7))}>
-              Later →
-            </button>
-          </div>
-        </div>
-        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-          Each strip is one week, Mon → Sun, one square per day. Green = working, grey = off, gold =
-          on leave. Pick a lodge for a working block and it applies to every day in that block.
-        </div>
-        <div style={styles.tableWrap}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Employee</th>
-                {weeks.map((w) => (
-                  <th style={styles.th} key={fmtDateOnly(w.start)}>
-                    {w.start.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' })}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {employees.map((e) => (
-                <tr key={e.id}>
-                  <td style={styles.td}>
-                    {e.first_name} {e.last_name}
-                  </td>
-                  {weeks.map((w) => {
-                    const dayStatuses = w.days.map((d) => ({ date: d, ...dayInfo(e, d) }))
-                    const firstOn = dayStatuses.find((d) => d.status === 'on')
-                    const blockLoc = firstOn ? locationByKey[`${e.id}|${firstOn.blockStart}`] : null
-                    return (
-                      <td style={styles.td} key={fmtDateOnly(w.start)}>
-                        <div style={{ display: 'flex', gap: 2, marginBottom: firstOn ? 4 : 0 }}>
-                          {dayStatuses.map((d, i) => (
-                            <div
-                              key={i}
-                              title={`${fmtDateOnly(d.date)} — ${d.status}`}
-                              style={{
-                                width: 10,
-                                height: 16,
-                                borderRadius: 2,
-                                background: dayStatusColor(d.status),
-                                border: d.status === 'none' ? `1px dashed ${colors.border}` : 'none',
-                              }}
-                            />
-                          ))}
-                        </div>
-                        {firstOn && (
-                          <select
-                            style={{ ...styles.smallInput, width: 68, padding: '3px 5px', fontSize: 11 }}
-                            value={blockLoc?.location_id || ''}
-                            onChange={(ev) => saveBlockLocation(e.id, firstOn.blockStart, ev.target.value)}
-                          >
-                            <option value="">—</option>
-                            {LOCATIONS.map((l) => (
-                              <option key={l.id} value={l.id}>
-                                {l.id}
-                              </option>
-                            ))}
-                          </select>
-                        )}
-                      </td>
-                    )
-                  })}
-                </tr>
-              ))}
-              {employees.length === 0 && (
-                <tr>
-                  <td style={styles.td} colSpan={WEEKS_SHOWN + 1}>
                     No employees yet.
                   </td>
                 </tr>
@@ -1492,9 +1596,11 @@ function LeaveTab({ employees, leave, onUpdateEmployee, onLeaveAdd, onLeaveRemov
 function EmployeesTab({ employees, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee }) {
   const today = parseDateOnly(todayStr())
 
+  const thisWeekKey = fmtDateOnly(startOfWeek(today))
+
   const locationByKey = useMemo(() => {
     const map = {}
-    for (const s of scheduleLocations) map[`${s.employee_id}|${s.block_start_date}`] = s
+    for (const s of scheduleLocations) map[`${s.employee_id}|${s.week_start_date}`] = s
     return map
   }, [scheduleLocations])
 
@@ -1513,6 +1619,34 @@ function EmployeesTab({ employees, scheduleLocations, leave, onAdd, onUpdate, on
     email: '',
   })
   const [saving, setSaving] = useState(false)
+  const [addingPosition, setAddingPosition] = useState(false)
+  const [newPositionText, setNewPositionText] = useState('')
+  const [addingPositionForId, setAddingPositionForId] = useState(null)
+  const [rowNewPositionText, setRowNewPositionText] = useState('')
+
+  // Positions aren't a fixed list — just whatever's already in use on real
+  // employees, plus whatever's currently picked (so the dropdown never
+  // shows blank right after typing a new one).
+  const positionOptions = useMemo(() => {
+    const set = new Set()
+    for (const e of employees) if (e.position) set.add(e.position)
+    if (form.position) set.add(form.position)
+    return Array.from(set).sort()
+  }, [employees, form.position])
+
+  function confirmNewPosition() {
+    const v = newPositionText.trim()
+    if (v) setForm((f) => ({ ...f, position: v }))
+    setAddingPosition(false)
+    setNewPositionText('')
+  }
+
+  function confirmRowPosition(employeeId) {
+    const v = rowNewPositionText.trim()
+    if (v) updateEmployee(employeeId, { position: v })
+    setAddingPositionForId(null)
+    setRowNewPositionText('')
+  }
 
   async function addEmployee() {
     if (!form.first_name.trim() || !form.last_name.trim()) return
@@ -1548,7 +1682,52 @@ function EmployeesTab({ employees, scheduleLocations, leave, onAdd, onUpdate, on
           </div>
           <div>
             <label style={styles.label}>Position</label>
-            <input style={styles.input} value={form.position} onChange={(e) => setForm({ ...form, position: e.target.value })} />
+            {addingPosition ? (
+              <div style={{ ...styles.row, gap: 4 }}>
+                <input
+                  autoFocus
+                  style={styles.input}
+                  placeholder="New position name"
+                  value={newPositionText}
+                  onChange={(e) => setNewPositionText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      confirmNewPosition()
+                    }
+                  }}
+                />
+                <button style={styles.buttonGhost} onClick={confirmNewPosition}>
+                  Use
+                </button>
+                <button
+                  style={styles.buttonGhost}
+                  onClick={() => {
+                    setAddingPosition(false)
+                    setNewPositionText('')
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <select
+                style={styles.input}
+                value={form.position}
+                onChange={(e) => {
+                  if (e.target.value === '__new__') setAddingPosition(true)
+                  else setForm({ ...form, position: e.target.value })
+                }}
+              >
+                <option value="">No position set</option>
+                {positionOptions.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+                <option value="__new__">+ Add new position…</option>
+              </select>
+            )}
           </div>
           <div>
             <label style={styles.label}>Department</label>
@@ -1598,10 +1777,10 @@ function EmployeesTab({ employees, scheduleLocations, leave, onAdd, onUpdate, on
           <tbody>
             {employees.map((e) => {
               const info = todayInfo(e)
-              const blockLoc = info.status === 'on' ? locationByKey[`${e.id}|${info.blockStart}`] : null
+              const weekLoc = info.status === 'on' ? locationByKey[`${e.id}|${thisWeekKey}`] : null
               const label =
                 info.status === 'on'
-                  ? `Working${blockLoc ? ` — ${blockLoc.location_id}` : ''}`
+                  ? `Working${weekLoc ? ` — ${weekLoc.location_id}` : ''}`
                   : info.status === 'leave'
                     ? 'On leave'
                     : info.status === 'off'
@@ -1622,11 +1801,47 @@ function EmployeesTab({ employees, scheduleLocations, leave, onAdd, onUpdate, on
                   </button>
                 </td>
                 <td style={styles.td}>
-                  <input
-                    style={{ ...styles.smallInput, width: 110 }}
-                    defaultValue={e.position || ''}
-                    onBlur={(ev) => updateEmployee(e.id, { position: ev.target.value })}
-                  />
+                  {addingPositionForId === e.id ? (
+                    <div style={{ ...styles.row, gap: 4 }}>
+                      <input
+                        autoFocus
+                        style={{ ...styles.smallInput, width: 100 }}
+                        placeholder="New position"
+                        value={rowNewPositionText}
+                        onChange={(ev) => setRowNewPositionText(ev.target.value)}
+                        onKeyDown={(ev) => {
+                          if (ev.key === 'Enter') {
+                            ev.preventDefault()
+                            confirmRowPosition(e.id)
+                          }
+                        }}
+                      />
+                      <button style={styles.buttonGhost} onClick={() => confirmRowPosition(e.id)}>
+                        Use
+                      </button>
+                    </div>
+                  ) : (
+                    <select
+                      style={{ ...styles.smallInput, width: 110 }}
+                      defaultValue={e.position || ''}
+                      onChange={(ev) => {
+                        if (ev.target.value === '__new__') {
+                          setAddingPositionForId(e.id)
+                          setRowNewPositionText('')
+                        } else {
+                          updateEmployee(e.id, { position: ev.target.value })
+                        }
+                      }}
+                    >
+                      <option value="">No position set</option>
+                      {positionOptions.map((p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      ))}
+                      <option value="__new__">+ Add new position…</option>
+                    </select>
+                  )}
                 </td>
                 <td style={styles.td}>
                   <input
