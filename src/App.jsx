@@ -34,6 +34,85 @@ function currentContract(employeeId, contracts) {
 }
 
 // ---------------------------------------------------------------------------
+// Work schedule — date math for the 21-days-on / 7-days-off rotation.
+// Cycles are NOT locked to calendar-week boundaries — an employee's anchor
+// date can be any day, so a single calendar week can show a mix of on/off
+// days around the transition. Everything below works at day granularity;
+// the schedule grid only groups days into weeks for display.
+// ---------------------------------------------------------------------------
+
+const CYCLE_ON_DAYS = 21
+const CYCLE_OFF_DAYS = 7
+const CYCLE_LENGTH = CYCLE_ON_DAYS + CYCLE_OFF_DAYS // 28
+
+// 'YYYY-MM-DD' -> local-midnight Date, avoiding the UTC-parsing footgun of
+// `new Date('YYYY-MM-DD')` (which lands on the previous day in any
+// timezone behind UTC).
+function parseDateOnly(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number)
+  return new Date(y, m - 1, d)
+}
+
+function fmtDateOnly(date) {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+function addDays(date, n) {
+  const d = new Date(date)
+  d.setDate(d.getDate() + n)
+  return d
+}
+
+// Monday of the calendar week containing `date`.
+function startOfWeek(date) {
+  const day = date.getDay() // 0 = Sun .. 6 = Sat
+  const diff = day === 0 ? -6 : 1 - day
+  return addDays(date, diff)
+}
+
+// { status: 'on' | 'off' | 'none', blockStart? } for a single day.
+// blockStart ('YYYY-MM-DD') is only set when status is 'on' — the date the
+// current 21-day block started, used as the key for its lodge assignment.
+// Works for any date, past or future, relative to the anchor.
+function cycleStatusForDate(cycleAnchorDate, date) {
+  if (!cycleAnchorDate) return { status: 'none' }
+  const anchor = parseDateOnly(cycleAnchorDate)
+  const diffDays = Math.round((date - anchor) / 86400000)
+  let phase = diffDays % CYCLE_LENGTH
+  if (phase < 0) phase += CYCLE_LENGTH
+  if (phase < CYCLE_ON_DAYS) {
+    return { status: 'on', blockStart: fmtDateOnly(addDays(date, -phase)) }
+  }
+  return { status: 'off' }
+}
+
+// Is `date` covered by any logged leave period for this employee? Leave
+// always overrides the calculated on/off status for display purposes.
+function leaveOnDate(leaveRows, employeeId, date) {
+  const ds = fmtDateOnly(date)
+  return leaveRows.find((l) => l.employee_id === employeeId && l.start_date <= ds && l.end_date >= ds) || null
+}
+
+// How many days in [startStr, endStr] (inclusive) fall on a day this
+// employee was already scheduled to work — used to snapshot the leave
+// deduction when it's logged (days that were already off-cycle cost
+// nothing, per how you wanted leave to interact with the rotation).
+function countWorkingDaysInRange(cycleAnchorDate, startStr, endStr) {
+  if (!cycleAnchorDate) return 0
+  let count = 0
+  let d = parseDateOnly(startStr)
+  const end = parseDateOnly(endStr)
+  while (d <= end) {
+    if (cycleStatusForDate(cycleAnchorDate, d).status === 'on') count++
+    d = addDays(d, 1)
+  }
+  return count
+}
+
+// ---------------------------------------------------------------------------
 // Shared styles (inline CSS-in-JS, same tokens as the other three apps)
 // ---------------------------------------------------------------------------
 
@@ -237,6 +316,8 @@ const STAFF_TABS = [
 const ADMIN_TABS = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'employees', label: 'Employees' },
+  { id: 'schedule', label: 'Schedule' },
+  { id: 'leave', label: 'Leave' },
   { id: 'uniforms', label: 'Uniforms' },
   { id: 'linen', label: 'Linen' },
   { id: 'suppliers', label: 'Suppliers' },
@@ -360,6 +441,8 @@ export default function App() {
   const [linenStock, setLinenStock] = useState([])
   const [linenMovements, setLinenMovements] = useState([])
   const [contracts, setContracts] = useState([])
+  const [scheduleLocations, setScheduleLocations] = useState([])
+  const [leave, setLeave] = useState([])
 
   async function loadAll() {
     setLoading(true)
@@ -374,11 +457,14 @@ export default function App() {
         sb.select('hr_linen_items', { active: true }, { order: 'category.asc,name.asc' }),
         sb.select('hr_linen_stock', {}, {}),
         sb.select('hr_linen_movements', {}, { order: 'date.desc' }),
+        sb.select('hr_schedule_locations', {}, {}),
+        sb.select('hr_leave', {}, { order: 'start_date.desc' }),
       ]
       // Contracts hold salary/medical aid/pension — only ever fetched for the
       // HR Admin role, so that data never transits to a Staff/Admin session.
       const results = await Promise.all(role === 'hradmin' ? [...base, sb.select('hr_contracts', {}, {})] : base)
-      const [empRes, supRes, uItemsRes, uStockRes, uIssuesRes, lItemsRes, lStockRes, lMoveRes, conRes] = results
+      const [empRes, supRes, uItemsRes, uStockRes, uIssuesRes, lItemsRes, lStockRes, lMoveRes, schedLocRes, leaveRes, conRes] =
+        results
 
       setEmployees(empRes || [])
       setSuppliers(supRes || [])
@@ -388,6 +474,8 @@ export default function App() {
       setLinenItems(lItemsRes || [])
       setLinenStock(lStockRes || [])
       setLinenMovements(lMoveRes || [])
+      setScheduleLocations(schedLocRes || [])
+      setLeave(leaveRes || [])
       setContracts(conRes || [])
     } catch (e) {
       setError(e.message)
@@ -482,6 +570,22 @@ export default function App() {
     setContracts((prev) => prev.map((c) => (c.id === row.id ? row : c)))
   }
 
+  function upsertLocalScheduleLocation(row) {
+    setScheduleLocations((prev) => {
+      const idx = prev.findIndex((s) => s.employee_id === row.employee_id && s.block_start_date === row.block_start_date)
+      if (idx === -1) return [...prev, row]
+      const copy = prev.slice()
+      copy[idx] = row
+      return copy
+    })
+  }
+  function addLocalLeave(row) {
+    setLeave((prev) => [row, ...prev])
+  }
+  function removeLocalLeave(id) {
+    setLeave((prev) => prev.filter((l) => l.id !== id))
+  }
+
   const employeeById = useMemo(() => {
     const map = {}
     for (const e of employees) map[e.id] = e
@@ -563,10 +667,30 @@ export default function App() {
             {activeTab === 'employees' && (role === 'admin' || role === 'hradmin') && (
               <EmployeesTab
                 employees={employees}
+                scheduleLocations={scheduleLocations}
+                leave={leave}
                 onAdd={addLocalEmployee}
                 onUpdate={updateLocalEmployee}
                 onRemove={removeLocalEmployee}
                 onSelectEmployee={setUniformEmployeeId}
+              />
+            )}
+            {activeTab === 'schedule' && (role === 'admin' || role === 'hradmin') && (
+              <ScheduleTab
+                employees={employees}
+                scheduleLocations={scheduleLocations}
+                leave={leave}
+                onUpdateEmployee={updateLocalEmployee}
+                onScheduleLocationChange={upsertLocalScheduleLocation}
+              />
+            )}
+            {activeTab === 'leave' && (role === 'admin' || role === 'hradmin') && (
+              <LeaveTab
+                employees={employees}
+                leave={leave}
+                onUpdateEmployee={updateLocalEmployee}
+                onLeaveAdd={addLocalLeave}
+                onLeaveRemove={removeLocalLeave}
               />
             )}
             {activeTab === 'uniforms' && (
@@ -912,10 +1036,473 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
 }
 
 // ---------------------------------------------------------------------------
+// Schedule tab — Admin/HR Admin: set each employee's 21-on/7-off cycle
+// anchor date, and assign which lodge they're working at for each working
+// block. The grid works at day granularity (cycles don't have to align to
+// calendar weeks) grouped into weekly columns for readability — a week can
+// show a mix of on/off/leave around a transition.
+// ---------------------------------------------------------------------------
+
+const WEEKS_SHOWN = 6
+
+function dayStatusColor(status) {
+  if (status === 'leave') return colors.gold
+  if (status === 'on') return colors.ok
+  if (status === 'off') return colors.border
+  return 'transparent' // 'none' — no cycle set for this employee
+}
+
+function ScheduleTab({ employees, scheduleLocations, leave, onUpdateEmployee, onScheduleLocationChange }) {
+  const today = parseDateOnly(todayStr())
+  const [weekStart, setWeekStart] = useState(() => startOfWeek(today))
+
+  const weeks = useMemo(
+    () =>
+      Array.from({ length: WEEKS_SHOWN }, (_, i) => {
+        const start = addDays(weekStart, i * 7)
+        return { start, days: Array.from({ length: 7 }, (_, d) => addDays(start, d)) }
+      }),
+    [weekStart]
+  )
+
+  const locationByKey = useMemo(() => {
+    const map = {}
+    for (const s of scheduleLocations) map[`${s.employee_id}|${s.block_start_date}`] = s
+    return map
+  }, [scheduleLocations])
+
+  function dayInfo(employee, date) {
+    if (leaveOnDate(leave, employee.id, date)) return { status: 'leave' }
+    return cycleStatusForDate(employee.cycle_anchor_date, date)
+  }
+
+  async function saveAnchor(employeeId, value) {
+    const [row] = await sb.update('hr_employees', { id: employeeId }, { cycle_anchor_date: value || null })
+    onUpdateEmployee(row)
+  }
+
+  async function saveBlockLocation(employeeId, blockStart, locationId) {
+    if (!locationId) return
+    const [row] = await sb.upsert(
+      'hr_schedule_locations',
+      { employee_id: employeeId, block_start_date: blockStart, location_id: locationId },
+      'employee_id,block_start_date'
+    )
+    onScheduleLocationChange(row)
+  }
+
+  return (
+    <>
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Cycles</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Set any date that fell on day 1 of an employee's 21-day working block — on/off is
+          calculated forward (and backward) from there in 28-day steps, so it doesn't have to be a
+          future date. Leave blank for anyone not on the rotation.
+        </div>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Employee</th>
+                <th style={styles.th}>Cycle anchor date</th>
+                <th style={styles.th}>Today</th>
+              </tr>
+            </thead>
+            <tbody>
+              {employees.map((e) => {
+                const info = dayInfo(e, today)
+                const label =
+                  info.status === 'on' ? 'Working' : info.status === 'leave' ? 'On leave' : info.status === 'off' ? 'Off' : 'No cycle set'
+                const tone = info.status === 'on' ? 'good' : 'neutral'
+                return (
+                  <tr key={e.id}>
+                    <td style={styles.td}>
+                      {e.first_name} {e.last_name}
+                    </td>
+                    <td style={styles.td}>
+                      <input
+                        type="date"
+                        style={styles.smallInput}
+                        defaultValue={e.cycle_anchor_date || ''}
+                        onBlur={(ev) => saveAnchor(e.id, ev.target.value)}
+                      />
+                    </td>
+                    <td style={styles.td}>
+                      <span style={styles.badge(tone)}>{label}</span>
+                    </td>
+                  </tr>
+                )
+              })}
+              {employees.length === 0 && (
+                <tr>
+                  <td style={styles.td} colSpan={3}>
+                    No employees yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
+          <div style={styles.cardTitle}>Weekly schedule</div>
+          <div style={{ ...styles.row, gap: 6 }}>
+            <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, -WEEKS_SHOWN * 7))}>
+              ← Earlier
+            </button>
+            <button style={styles.buttonGhost} onClick={() => setWeekStart(startOfWeek(today))}>
+              Today
+            </button>
+            <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, WEEKS_SHOWN * 7))}>
+              Later →
+            </button>
+          </div>
+        </div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Each strip is one week, Mon → Sun, one square per day. Green = working, grey = off, gold =
+          on leave. Pick a lodge for a working block and it applies to every day in that block.
+        </div>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Employee</th>
+                {weeks.map((w) => (
+                  <th style={styles.th} key={fmtDateOnly(w.start)}>
+                    {w.start.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' })}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {employees.map((e) => (
+                <tr key={e.id}>
+                  <td style={styles.td}>
+                    {e.first_name} {e.last_name}
+                  </td>
+                  {weeks.map((w) => {
+                    const dayStatuses = w.days.map((d) => ({ date: d, ...dayInfo(e, d) }))
+                    const firstOn = dayStatuses.find((d) => d.status === 'on')
+                    const blockLoc = firstOn ? locationByKey[`${e.id}|${firstOn.blockStart}`] : null
+                    return (
+                      <td style={styles.td} key={fmtDateOnly(w.start)}>
+                        <div style={{ display: 'flex', gap: 2, marginBottom: firstOn ? 4 : 0 }}>
+                          {dayStatuses.map((d, i) => (
+                            <div
+                              key={i}
+                              title={`${fmtDateOnly(d.date)} — ${d.status}`}
+                              style={{
+                                width: 10,
+                                height: 16,
+                                borderRadius: 2,
+                                background: dayStatusColor(d.status),
+                                border: d.status === 'none' ? `1px dashed ${colors.border}` : 'none',
+                              }}
+                            />
+                          ))}
+                        </div>
+                        {firstOn && (
+                          <select
+                            style={{ ...styles.smallInput, width: 68, padding: '3px 5px', fontSize: 11 }}
+                            value={blockLoc?.location_id || ''}
+                            onChange={(ev) => saveBlockLocation(e.id, firstOn.blockStart, ev.target.value)}
+                          >
+                            <option value="">—</option>
+                            {LOCATIONS.map((l) => (
+                              <option key={l.id} value={l.id}>
+                                {l.id}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </td>
+                    )
+                  })}
+                </tr>
+              ))}
+              {employees.length === 0 && (
+                <tr>
+                  <td style={styles.td} colSpan={WEEKS_SHOWN + 1}>
+                    No employees yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Leave tab — Admin/HR Admin: set each employee's annual leave allowance,
+// log leave periods (auto-marks those days unavailable on the Schedule tab
+// via leaveOnDate), and see the running balance for whichever year you're
+// looking at. Only days that fell on an already-scheduled working day are
+// deducted — a leave day that lands on a regular off-cycle week costs
+// nothing, since it wasn't going to be worked anyway.
+// ---------------------------------------------------------------------------
+
+function LeaveTab({ employees, leave, onUpdateEmployee, onLeaveAdd, onLeaveRemove }) {
+  const [leaveForm, setLeaveForm] = useState({ employee_id: '', start_date: '', end_date: '', note: '' })
+  const [logging, setLogging] = useState(false)
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear())
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null)
+
+  const employeeById = useMemo(() => {
+    const map = {}
+    for (const e of employees) map[e.id] = e
+    return map
+  }, [employees])
+
+  const availableYears = useMemo(() => {
+    const set = new Set([new Date().getFullYear()])
+    for (const l of leave) set.add(Number(l.start_date.slice(0, 4)))
+    return Array.from(set).sort((a, b) => b - a)
+  }, [leave])
+
+  const usedByEmployee = useMemo(() => {
+    const map = {}
+    for (const l of leave) {
+      if (Number(l.start_date.slice(0, 4)) !== selectedYear) continue
+      map[l.employee_id] = (map[l.employee_id] || 0) + Number(l.days_used || 0)
+    }
+    return map
+  }, [leave, selectedYear])
+
+  const yearEntries = useMemo(
+    () =>
+      leave
+        .filter((l) => Number(l.start_date.slice(0, 4)) === selectedYear)
+        .sort((a, b) => (a.start_date < b.start_date ? 1 : -1)),
+    [leave, selectedYear]
+  )
+
+  async function saveAllocation(employeeId, value) {
+    const [row] = await sb.update('hr_employees', { id: employeeId }, { annual_leave_days: Number(value) || 0 })
+    onUpdateEmployee(row)
+  }
+
+  async function logLeave() {
+    if (!leaveForm.employee_id || !leaveForm.start_date || !leaveForm.end_date) return
+    if (leaveForm.end_date < leaveForm.start_date) return
+    setLogging(true)
+    const emp = employeeById[leaveForm.employee_id]
+    const daysUsed = countWorkingDaysInRange(emp?.cycle_anchor_date, leaveForm.start_date, leaveForm.end_date)
+    const [row] = await sb.insert('hr_leave', {
+      employee_id: leaveForm.employee_id,
+      start_date: leaveForm.start_date,
+      end_date: leaveForm.end_date,
+      days_used: daysUsed,
+      note: leaveForm.note || null,
+    })
+    onLeaveAdd(row)
+    setLeaveForm({ employee_id: leaveForm.employee_id, start_date: '', end_date: '', note: '' })
+    setLogging(false)
+  }
+
+  async function deleteLeave(id) {
+    await sb.remove('hr_leave', { id })
+    onLeaveRemove(id)
+    setConfirmDeleteId(null)
+  }
+
+  const itemEmployeeName = (id) => {
+    const e = employeeById[id]
+    return e ? `${e.first_name} ${e.last_name}` : 'Unknown employee'
+  }
+
+  return (
+    <>
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Log leave</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Only the days in this range that fall on the employee's regular working days count against
+          their balance — days that were already a scheduled off week are free. Those dates also show
+          as "On leave" on the Schedule tab.
+        </div>
+        <div style={styles.formGrid}>
+          <div>
+            <label style={styles.label}>Employee</label>
+            <select
+              style={styles.input}
+              value={leaveForm.employee_id}
+              onChange={(e) => setLeaveForm({ ...leaveForm, employee_id: e.target.value })}
+            >
+              <option value="">Choose employee…</option>
+              {employees.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.first_name} {e.last_name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={styles.label}>Start date</label>
+            <input
+              type="date"
+              style={styles.input}
+              value={leaveForm.start_date}
+              onChange={(e) => setLeaveForm({ ...leaveForm, start_date: e.target.value })}
+            />
+          </div>
+          <div>
+            <label style={styles.label}>End date</label>
+            <input
+              type="date"
+              style={styles.input}
+              value={leaveForm.end_date}
+              onChange={(e) => setLeaveForm({ ...leaveForm, end_date: e.target.value })}
+            />
+          </div>
+          <div>
+            <label style={styles.label}>Note (optional)</label>
+            <input style={styles.input} value={leaveForm.note} onChange={(e) => setLeaveForm({ ...leaveForm, note: e.target.value })} />
+          </div>
+        </div>
+        <button
+          style={styles.button}
+          onClick={logLeave}
+          disabled={logging || !leaveForm.employee_id || !leaveForm.start_date || !leaveForm.end_date}
+        >
+          {logging ? 'Saving…' : 'Log leave'}
+        </button>
+      </div>
+
+      <div style={styles.card}>
+        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
+          <div style={styles.cardTitle}>Balances — {selectedYear}</div>
+          <select style={{ ...styles.smallInput, width: 90 }} value={selectedYear} onChange={(e) => setSelectedYear(Number(e.target.value))}>
+            {availableYears.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Employee</th>
+                <th style={styles.th}>Annual allowance</th>
+                <th style={styles.th}>Used ({selectedYear})</th>
+                <th style={styles.th}>Remaining</th>
+              </tr>
+            </thead>
+            <tbody>
+              {employees.map((e) => {
+                const used = usedByEmployee[e.id] || 0
+                const remaining = Number(e.annual_leave_days || 0) - used
+                return (
+                  <tr key={e.id}>
+                    <td style={styles.td}>
+                      {e.first_name} {e.last_name}
+                    </td>
+                    <td style={styles.td}>
+                      <input
+                        type="number"
+                        style={styles.smallInput}
+                        defaultValue={e.annual_leave_days ?? 0}
+                        onBlur={(ev) => saveAllocation(e.id, ev.target.value)}
+                      />
+                    </td>
+                    <td style={styles.tdNum}>{fmt(used, 0)}</td>
+                    <td style={styles.tdNum}>
+                      <strong style={{ color: remaining < 0 ? colors.danger : colors.cream }}>{fmt(remaining, 0)}</strong>
+                    </td>
+                  </tr>
+                )
+              })}
+              {employees.length === 0 && (
+                <tr>
+                  <td style={styles.td} colSpan={4}>
+                    No employees yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Logged leave — {selectedYear}</div>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Employee</th>
+                <th style={styles.th}>From</th>
+                <th style={styles.th}>To</th>
+                <th style={styles.th}>Days used</th>
+                <th style={styles.th}>Note</th>
+                <th style={styles.th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {yearEntries.map((l) => (
+                <tr key={l.id}>
+                  <td style={styles.td}>{itemEmployeeName(l.employee_id)}</td>
+                  <td style={styles.td}>{l.start_date}</td>
+                  <td style={styles.td}>{l.end_date}</td>
+                  <td style={styles.tdNum}>{fmt(l.days_used, 0)}</td>
+                  <td style={styles.td}>{l.note || '—'}</td>
+                  <td style={styles.td}>
+                    {confirmDeleteId === l.id ? (
+                      <div style={{ ...styles.row, gap: 4 }}>
+                        <button style={styles.buttonDanger} onClick={() => deleteLeave(l.id)}>
+                          Confirm delete?
+                        </button>
+                        <button style={styles.buttonGhost} onClick={() => setConfirmDeleteId(null)}>
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button style={styles.buttonGhost} onClick={() => setConfirmDeleteId(l.id)}>
+                        Delete
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {yearEntries.length === 0 && (
+                <tr>
+                  <td style={styles.td} colSpan={6}>
+                    No leave logged for {selectedYear} yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Employees tab — Admin/HR Admin: master list, one lodge at a time.
 // ---------------------------------------------------------------------------
 
-function EmployeesTab({ employees, onAdd, onUpdate, onRemove, onSelectEmployee }) {
+function EmployeesTab({ employees, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee }) {
+  const today = parseDateOnly(todayStr())
+
+  const locationByKey = useMemo(() => {
+    const map = {}
+    for (const s of scheduleLocations) map[`${s.employee_id}|${s.block_start_date}`] = s
+    return map
+  }, [scheduleLocations])
+
+  function todayInfo(employee) {
+    if (leaveOnDate(leave, employee.id, today)) return { status: 'leave' }
+    return cycleStatusForDate(employee.cycle_anchor_date, today)
+  }
+
   const [form, setForm] = useState({
     first_name: '',
     last_name: '',
@@ -997,6 +1584,7 @@ function EmployeesTab({ employees, onAdd, onUpdate, onRemove, onSelectEmployee }
           <thead>
             <tr>
               <th style={styles.th}>Name</th>
+              <th style={styles.th}>Today</th>
               <th style={styles.th}>Uniforms</th>
               <th style={styles.th}>Position</th>
               <th style={styles.th}>Department</th>
@@ -1008,10 +1596,25 @@ function EmployeesTab({ employees, onAdd, onUpdate, onRemove, onSelectEmployee }
             </tr>
           </thead>
           <tbody>
-            {employees.map((e) => (
+            {employees.map((e) => {
+              const info = todayInfo(e)
+              const blockLoc = info.status === 'on' ? locationByKey[`${e.id}|${info.blockStart}`] : null
+              const label =
+                info.status === 'on'
+                  ? `Working${blockLoc ? ` — ${blockLoc.location_id}` : ''}`
+                  : info.status === 'leave'
+                    ? 'On leave'
+                    : info.status === 'off'
+                      ? 'Off'
+                      : '—'
+              const tone = info.status === 'on' ? 'good' : 'neutral'
+              return (
               <tr key={e.id}>
                 <td style={styles.td}>
                   {e.first_name} {e.last_name}
+                </td>
+                <td style={styles.td}>
+                  <span style={styles.badge(tone)}>{label}</span>
                 </td>
                 <td style={styles.td}>
                   <button style={styles.buttonGhost} onClick={() => onSelectEmployee(e.id)}>
@@ -1063,10 +1666,11 @@ function EmployeesTab({ employees, onAdd, onUpdate, onRemove, onSelectEmployee }
                   </button>
                 </td>
               </tr>
-            ))}
+              )
+            })}
             {employees.length === 0 && (
               <tr>
-                <td style={styles.td} colSpan={9}>
+                <td style={styles.td} colSpan={10}>
                   No employees yet — add one above.
                 </td>
               </tr>
