@@ -30,18 +30,25 @@ create table if not exists hr_access (
 -- there's no per-location split here (unlike Linen, further down).
 -- ---------------------------------------------------------------------------
 create table if not exists hr_employees (
-  id              uuid primary key default gen_random_uuid(),
-  first_name      text not null,
-  last_name       text not null,
-  position        text,
-  department      text,
-  start_date      date,
-  phone           text,
-  email           text,
-  status          text not null default 'Active' check (status in ('Active', 'Inactive')),
-  notes           text,
-  active          boolean not null default true,
-  created_at      timestamptz not null default now()
+  id                  uuid primary key default gen_random_uuid(),
+  first_name          text not null,
+  last_name           text not null,
+  position            text,
+  department          text,
+  start_date          date,
+  phone               text,
+  email               text,
+  status              text not null default 'Active' check (status in ('Active', 'Inactive')),
+  notes               text,
+  active              boolean not null default true,
+  created_at          timestamptz not null default now(),
+  -- Work-schedule builder: any date that fell on day 1 of a known working
+  -- block — on/off is calculated forward AND backward from there in
+  -- 28-day (21 on + 7 off) steps, so it doesn't have to be a future date.
+  -- Null = this person isn't on the rotation (e.g. office/admin staff).
+  cycle_anchor_date   date,
+  -- Leave days granted per calendar year, going forward, until changed.
+  annual_leave_days   numeric not null default 0
 );
 
 -- ---------------------------------------------------------------------------
@@ -175,6 +182,38 @@ create index if not exists idx_hr_contracts_employee on hr_contracts(employee_id
 create index if not exists idx_hr_contracts_end_date on hr_contracts(end_date);
 
 -- ---------------------------------------------------------------------------
+-- Work schedule — hr_schedule_locations records which lodge an employee is
+-- assigned to for a given calendar week (Monday date), so lodge can change
+-- week to week within the same working block, not just once per rotation.
+-- hr_leave holds logged leave periods; days_used is a snapshot taken when
+-- the leave is entered (only days that fell on a scheduled working day
+-- count), so a later change to someone's cycle anchor can't silently
+-- rewrite past balances.
+-- ---------------------------------------------------------------------------
+create table if not exists hr_schedule_locations (
+  id                uuid primary key default gen_random_uuid(),
+  employee_id       uuid not null references hr_employees(id) on delete cascade,
+  week_start_date   date not null,
+  location_id       text not null check (location_id in ('ZC', 'EC', 'SC')),
+  created_at        timestamptz not null default now(),
+  unique (employee_id, week_start_date)
+);
+
+create index if not exists idx_hr_schedule_locations_employee on hr_schedule_locations(employee_id);
+
+create table if not exists hr_leave (
+  id            uuid primary key default gen_random_uuid(),
+  employee_id   uuid not null references hr_employees(id) on delete cascade,
+  start_date    date not null,
+  end_date      date not null,
+  days_used     numeric not null default 0,
+  note          text,
+  created_at    timestamptz not null default now()
+);
+
+create index if not exists idx_hr_leave_employee on hr_leave(employee_id);
+
+-- ---------------------------------------------------------------------------
 -- Row Level Security — open allow_all policies via the anon key, same
 -- approach as the other three apps. hr_access is read-only from the
 -- client. Same caveat as always: this is a client-side role gate, not
@@ -193,6 +232,8 @@ alter table hr_linen_items       enable row level security;
 alter table hr_linen_stock       enable row level security;
 alter table hr_linen_movements   enable row level security;
 alter table hr_contracts         enable row level security;
+alter table hr_schedule_locations enable row level security;
+alter table hr_leave             enable row level security;
 
 -- drop-then-create so this script is safe to run more than once (Postgres
 -- has no "create policy if not exists").
@@ -226,6 +267,12 @@ create policy allow_all_hr_linen_movements on hr_linen_movements
 drop policy if exists allow_all_hr_contracts on hr_contracts;
 create policy allow_all_hr_contracts on hr_contracts
   for all using (true) with check (true);
+drop policy if exists allow_all_hr_schedule_locations on hr_schedule_locations;
+create policy allow_all_hr_schedule_locations on hr_schedule_locations
+  for all using (true) with check (true);
+drop policy if exists allow_all_hr_leave on hr_leave;
+create policy allow_all_hr_leave on hr_leave
+  for all using (true) with check (true);
 
 -- ---------------------------------------------------------------------------
 -- Baseline table grants — Postgres requires these separately from RLS
@@ -234,15 +281,17 @@ create policy allow_all_hr_contracts on hr_contracts
 grant usage on schema public to anon, authenticated;
 
 grant select on public.hr_access to anon, authenticated;
-grant select, insert, update, delete on public.hr_employees        to anon, authenticated;
-grant select, insert, update, delete on public.hr_suppliers        to anon, authenticated;
-grant select, insert, update, delete on public.hr_uniform_items    to anon, authenticated;
-grant select, insert, update, delete on public.hr_uniform_stock    to anon, authenticated;
-grant select, insert, update, delete on public.hr_uniform_issues   to anon, authenticated;
-grant select, insert, update, delete on public.hr_linen_items      to anon, authenticated;
-grant select, insert, update, delete on public.hr_linen_stock      to anon, authenticated;
-grant select, insert, update, delete on public.hr_linen_movements  to anon, authenticated;
-grant select, insert, update, delete on public.hr_contracts        to anon, authenticated;
+grant select, insert, update, delete on public.hr_employees          to anon, authenticated;
+grant select, insert, update, delete on public.hr_suppliers          to anon, authenticated;
+grant select, insert, update, delete on public.hr_uniform_items      to anon, authenticated;
+grant select, insert, update, delete on public.hr_uniform_stock      to anon, authenticated;
+grant select, insert, update, delete on public.hr_uniform_issues     to anon, authenticated;
+grant select, insert, update, delete on public.hr_linen_items        to anon, authenticated;
+grant select, insert, update, delete on public.hr_linen_stock        to anon, authenticated;
+grant select, insert, update, delete on public.hr_linen_movements    to anon, authenticated;
+grant select, insert, update, delete on public.hr_contracts          to anon, authenticated;
+grant select, insert, update, delete on public.hr_schedule_locations to anon, authenticated;
+grant select, insert, update, delete on public.hr_leave              to anon, authenticated;
 
 -- Default passwords — CHANGE THESE immediately via the Table Editor
 -- (hr_access table) after setup. Three separate passwords this time.
