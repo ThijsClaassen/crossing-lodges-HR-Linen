@@ -53,7 +53,7 @@ export const sb = {
     if (opts.select) params.select = opts.select
     if (opts.order) params.order = opts.order
     const res = await fetch(`${REST}/${table}${qs(params)}`, {
-      headers: headers(),
+      headers: await headers(),
     })
     return handle(res)
   },
@@ -61,7 +61,7 @@ export const sb = {
   async insert(table, rows) {
     const res = await fetch(`${REST}/${table}`, {
       method: 'POST',
-      headers: headers({ Prefer: 'return=representation' }),
+      headers: await headers({ Prefer: 'return=representation' }),
       body: JSON.stringify(Array.isArray(rows) ? rows : [rows]),
     })
     return handle(res)
@@ -73,7 +73,7 @@ export const sb = {
       `${REST}/${table}?on_conflict=${encodeURIComponent(onConflict)}`,
       {
         method: 'POST',
-        headers: headers({
+        headers: await headers({
           Prefer: 'resolution=merge-duplicates,return=representation',
         }),
         body: JSON.stringify(Array.isArray(rows) ? rows : [rows]),
@@ -85,7 +85,7 @@ export const sb = {
   async update(table, filters, patch) {
     const res = await fetch(`${REST}/${table}${qs(filters)}`, {
       method: 'PATCH',
-      headers: headers({ Prefer: 'return=representation' }),
+      headers: await headers({ Prefer: 'return=representation' }),
       body: JSON.stringify(patch),
     })
     return handle(res)
@@ -94,7 +94,7 @@ export const sb = {
   async remove(table, filters) {
     const res = await fetch(`${REST}/${table}${qs(filters)}`, {
       method: 'DELETE',
-      headers: headers({ Prefer: 'return=representation' }),
+      headers: await headers({ Prefer: 'return=representation' }),
     })
     return handle(res)
   },
