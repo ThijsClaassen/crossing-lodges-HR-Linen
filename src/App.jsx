@@ -1,6 +1,10 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { sb, LOCATIONS, UNIFORM_CATEGORIES, LINEN_CATEGORIES, MOVEMENT_REASONS, CONTRACT_TYPES } from './sb.js'
 import { colors, fonts } from './theme.js'
+import { supabase } from './supabaseClient.js'
+import Login from './Login.jsx'
+import SetPassword from './SetPassword.jsx'
+import { CompanyProvider, useCompany } from './CompanyContext.jsx'
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -402,86 +406,80 @@ function tabsForRole(role) {
 // Auth
 // ---------------------------------------------------------------------------
 
-function useAuth() {
-  const [role, setRole] = useState(() => {
-    try {
-      return localStorage.getItem('hr_role') || null
-    } catch {
-      return null
-    }
-  })
-
-  function login(r) {
-    try {
-      localStorage.setItem('hr_role', r)
-    } catch {
-      /* ignore storage errors */
-    }
-    setRole(r)
-  }
-
-  function logout() {
-    try {
-      localStorage.removeItem('hr_role')
-    } catch {
-      /* ignore storage errors */
-    }
-    setRole(null)
-  }
-
-  return { role, login, logout }
-}
-
 const ROLE_LABELS = { staff: 'Staff', admin: 'Admin', hradmin: 'HR Admin' }
 
-function LoginScreen({ onLogin }) {
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
-  const [checking, setChecking] = useState(false)
+// Real Supabase Auth replaces the old shared staff/admin/hradmin password
+// checked against hr_access (2026-08-08 — HR/Linen 3b of the multi-tenant
+// rebuild). hr_access is deliberately left in the schema, unused, same
+// decision as food_access — cleanup is a later call.
+//
+// Supabase's invite/recovery links land back here with a #type=invite or
+// #type=recovery hash fragment when someone lands back in the app from an
+// email link — read once, synchronously, on first render, before
+// supabase-js has a chance to process and clear it.
+function getAuthHashType() {
+  if (typeof window === 'undefined' || !window.location.hash) return null
+  return new URLSearchParams(window.location.hash.slice(1)).get('type')
+}
 
-  async function submit(e) {
-    e.preventDefault()
-    if (!password) return
-    setChecking(true)
-    setError('')
-    try {
-      const rows = await sb.select('hr_access', { password })
-      if (rows && rows.length) {
-        onLogin(rows[0].role)
-      } else {
-        setError('Incorrect password.')
-      }
-    } catch (err) {
-      setError(`Could not reach the database: ${err.message}`)
-    } finally {
-      setChecking(false)
-    }
+const authScreenStyle = {
+  fontFamily: fonts.body,
+  background: colors.bg,
+  minHeight: '100vh',
+  color: colors.cream,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+}
+
+function AuthMessageScreen({ children }) {
+  return (
+    <div style={authScreenStyle}>
+      <div style={{ textAlign: 'center', maxWidth: 320 }}>{children}</div>
+    </div>
+  )
+}
+
+export default function App() {
+  // undefined = still checking for an existing session, null = signed out
+  const [session, setSession] = useState(undefined)
+  const [needsPasswordSetup, setNeedsPasswordSetup] = useState(() => {
+    const type = getAuthHashType()
+    return type === 'invite' || type === 'recovery'
+  })
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session))
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession)
+    })
+    return () => subscription.unsubscribe()
+  }, [])
+
+  if (session === undefined) {
+    return (
+      <AuthMessageScreen>
+        <p>Loading…</p>
+      </AuthMessageScreen>
+    )
   }
 
+  if (!session) {
+    return <Login />
+  }
+
+  if (needsPasswordSetup) {
+    return <SetPassword onDone={() => setNeedsPasswordSetup(false)} />
+  }
+
+  // key forces CompanyProvider to reload from scratch if a different user
+  // signs in without a full page refresh.
   return (
-    <div style={{ ...styles.app, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <form onSubmit={submit} style={{ ...styles.card, width: 280 }}>
-        <img
-          src="/logo.png"
-          alt=""
-          style={{ height: 56, width: 'auto', display: 'block', margin: '0 auto 12px' }}
-          onError={(e) => (e.target.style.display = 'none')}
-        />
-        <div style={{ ...styles.cardTitle, textAlign: 'center' }}>Crossing Lodges — HR & Housekeeping</div>
-        <label style={styles.label}>Password</label>
-        <input
-          type="password"
-          autoFocus
-          style={styles.input}
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-        {error && <div style={{ color: colors.danger, fontSize: 12, marginTop: 8 }}>{error}</div>}
-        <button type="submit" style={{ ...styles.button, width: '100%', marginTop: 12 }} disabled={checking}>
-          {checking ? 'Checking…' : 'Log in'}
-        </button>
-      </form>
-    </div>
+    <CompanyProvider key={session.user.id}>
+      <AuthenticatedApp />
+    </CompanyProvider>
   )
 }
 
@@ -489,8 +487,28 @@ function LoginScreen({ onLogin }) {
 // App
 // ---------------------------------------------------------------------------
 
-export default function App() {
-  const { role, login, logout } = useAuth()
+function AuthenticatedApp() {
+  const {
+    loading: companyLoading,
+    error: companyError,
+    availableCompanies,
+    companyId,
+    companyName,
+    role: baseRole,
+    isHrAdmin,
+    switchCompany,
+  } = useCompany()
+
+  // The app's existing tab-gating logic everywhere checks role === 'admin'
+  // or role === 'hradmin' — deriving the same three-value string here means
+  // none of that logic below needed to change, only where the value comes
+  // from.
+  const role = baseRole === 'admin' && isHrAdmin ? 'hradmin' : baseRole
+
+  async function logout() {
+    await supabase.auth.signOut()
+  }
+
   const [tab, setTab] = useState('dashboard')
   const [menuOpen, setMenuOpen] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -517,20 +535,22 @@ export default function App() {
     setError(null)
     try {
       const base = [
-        sb.select('hr_employees', { active: true }, { order: 'first_name.asc' }),
-        sb.select('hr_suppliers', { active: true }, { order: 'name.asc' }),
-        sb.select('hr_uniform_items', { active: true }, { order: 'category.asc,name.asc' }),
-        sb.select('hr_uniform_stock', {}, {}),
-        sb.select('hr_uniform_issues', {}, { order: 'created_at.desc' }),
-        sb.select('hr_linen_items', { active: true }, { order: 'category.asc,name.asc' }),
-        sb.select('hr_linen_stock', {}, {}),
-        sb.select('hr_linen_movements', {}, { order: 'date.desc' }),
-        sb.select('hr_schedule_locations', {}, {}),
-        sb.select('hr_leave', {}, { order: 'start_date.desc' }),
+        sb.select('hr_employees', { company_id: companyId, active: true }, { order: 'first_name.asc' }),
+        sb.select('hr_suppliers', { company_id: companyId, active: true }, { order: 'name.asc' }),
+        sb.select('hr_uniform_items', { company_id: companyId, active: true }, { order: 'category.asc,name.asc' }),
+        sb.select('hr_uniform_stock', { company_id: companyId }, {}),
+        sb.select('hr_uniform_issues', { company_id: companyId }, { order: 'created_at.desc' }),
+        sb.select('hr_linen_items', { company_id: companyId, active: true }, { order: 'category.asc,name.asc' }),
+        sb.select('hr_linen_stock', { company_id: companyId }, {}),
+        sb.select('hr_linen_movements', { company_id: companyId }, { order: 'date.desc' }),
+        sb.select('hr_schedule_locations', { company_id: companyId }, {}),
+        sb.select('hr_leave', { company_id: companyId }, { order: 'start_date.desc' }),
       ]
       // Contracts hold salary/medical aid/pension — only ever fetched for the
       // HR Admin role, so that data never transits to a Staff/Admin session.
-      const results = await Promise.all(role === 'hradmin' ? [...base, sb.select('hr_contracts', {}, {})] : base)
+      const results = await Promise.all(
+        role === 'hradmin' ? [...base, sb.select('hr_contracts', { company_id: companyId }, {})] : base
+      )
       const [empRes, supRes, uItemsRes, uStockRes, uIssuesRes, lItemsRes, lStockRes, lMoveRes, schedLocRes, leaveRes, conRes] =
         results
 
@@ -553,9 +573,9 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (role) loadAll()
+    if (role && companyId) loadAll()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [role])
+  }, [role, companyId])
 
   // ---------------------------------------------------------------------------
   // Local (optimistic) state updates — patch just the affected row(s) from
@@ -672,8 +692,39 @@ export default function App() {
     return map
   }, [uniformStock])
 
-  if (!role) {
-    return <LoginScreen onLogin={login} />
+  // Company-access guards — placed here, after every hook above, rather
+  // than before them: React requires the same hooks to run on every render
+  // in the same order, so an early return can't come before a useState.
+  if (companyLoading) {
+    return (
+      <AuthMessageScreen>
+        <p>Loading your account…</p>
+      </AuthMessageScreen>
+    )
+  }
+
+  if (companyError) {
+    return (
+      <AuthMessageScreen>
+        <p style={{ color: colors.danger, marginBottom: 12 }}>Could not load your company access: {companyError}</p>
+        <button style={styles.button} onClick={logout}>
+          Log out
+        </button>
+      </AuthMessageScreen>
+    )
+  }
+
+  if (!companyId) {
+    return (
+      <AuthMessageScreen>
+        <p style={{ marginBottom: 12 }}>
+          Your account isn't linked to any company yet. Contact your administrator to get access.
+        </p>
+        <button style={styles.button} onClick={logout}>
+          Log out
+        </button>
+      </AuthMessageScreen>
+    )
   }
 
   const TABS = tabsForRole(role)
@@ -690,9 +741,22 @@ export default function App() {
               style={{ ...styles.logo, flexShrink: 0 }}
               onError={(e) => (e.target.style.display = 'none')}
             />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>Crossing Lodges — HR & Housekeeping</span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{companyName} — HR & Housekeeping</span>
           </div>
           <div style={{ ...styles.row, flexShrink: 0 }}>
+            {availableCompanies.length > 1 && (
+              <select
+                value={companyId}
+                onChange={(e) => switchCompany(e.target.value)}
+                style={{ ...styles.smallInput, width: 'auto' }}
+              >
+                {availableCompanies.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            )}
             <span style={styles.badge('neutral')}>{ROLE_LABELS[role]}</span>
             <button style={{ ...styles.pill(false), padding: '4px 10px' }} onClick={logout}>
               Log out
@@ -734,6 +798,7 @@ export default function App() {
             )}
             {activeTab === 'employees' && (role === 'admin' || role === 'hradmin') && (
               <EmployeesTab
+                companyId={companyId}
                 employees={employees}
                 scheduleLocations={scheduleLocations}
                 leave={leave}
@@ -745,6 +810,7 @@ export default function App() {
             )}
             {activeTab === 'schedule' && (role === 'admin' || role === 'hradmin') && (
               <ScheduleTab
+                companyId={companyId}
                 employees={employees}
                 scheduleLocations={scheduleLocations}
                 leave={leave}
@@ -754,6 +820,7 @@ export default function App() {
             )}
             {activeTab === 'leave' && (role === 'admin' || role === 'hradmin') && (
               <LeaveTab
+                companyId={companyId}
                 employees={employees}
                 leave={leave}
                 onUpdateEmployee={updateLocalEmployee}
@@ -764,6 +831,7 @@ export default function App() {
             {activeTab === 'uniforms' && (
               <UniformsTab
                 role={role}
+                companyId={companyId}
                 items={uniformItems}
                 stockByItem={uniformStockByItem}
                 issues={uniformIssues}
@@ -780,6 +848,7 @@ export default function App() {
             {activeTab === 'linen' && (
               <LinenTab
                 role={role}
+                companyId={companyId}
                 items={linenItems}
                 stock={linenStock}
                 movements={linenMovements}
@@ -793,6 +862,7 @@ export default function App() {
             )}
             {activeTab === 'suppliers' && (role === 'admin' || role === 'hradmin') && (
               <SuppliersTab
+                companyId={companyId}
                 suppliers={suppliers}
                 onAdd={addLocalSupplier}
                 onUpdate={updateLocalSupplier}
@@ -810,6 +880,7 @@ export default function App() {
             )}
             {activeTab === 'contracts' && role === 'hradmin' && (
               <ContractsTab
+                companyId={companyId}
                 employees={employees}
                 contracts={contracts}
                 onAdd={addLocalContract}
@@ -855,6 +926,7 @@ export default function App() {
       {uniformEmployeeId && employeeById[uniformEmployeeId] && (
         <EmployeeUniformModal
           role={role}
+          companyId={companyId}
           employee={employeeById[uniformEmployeeId]}
           items={uniformItems}
           stockByItem={uniformStockByItem}
@@ -1144,7 +1216,7 @@ function dayStatusColor(status) {
   return 'transparent' // 'none' — no cycle set for this employee
 }
 
-function ScheduleTab({ employees, scheduleLocations, leave, onUpdateEmployee, onScheduleLocationChange }) {
+function ScheduleTab({ companyId, employees, scheduleLocations, leave, onUpdateEmployee, onScheduleLocationChange }) {
   const today = parseDateOnly(todayStr())
   const [weekStart, setWeekStart] = useState(() => startOfWeek(today))
   const [positionFilter, setPositionFilter] = useState('')
@@ -1184,7 +1256,7 @@ function ScheduleTab({ employees, scheduleLocations, leave, onUpdateEmployee, on
     if (!locationId) return
     const [row] = await sb.upsert(
       'hr_schedule_locations',
-      { employee_id: employeeId, week_start_date: weekStartStr, location_id: locationId },
+      { employee_id: employeeId, week_start_date: weekStartStr, location_id: locationId, company_id: companyId },
       'employee_id,week_start_date'
     )
     onScheduleLocationChange(row)
@@ -1443,7 +1515,7 @@ function ScheduleTab({ employees, scheduleLocations, leave, onUpdateEmployee, on
 // nothing, since it wasn't going to be worked anyway.
 // ---------------------------------------------------------------------------
 
-function LeaveTab({ employees, leave, onUpdateEmployee, onLeaveAdd, onLeaveRemove }) {
+function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, onLeaveRemove }) {
   const [leaveForm, setLeaveForm] = useState({ employee_id: '', start_date: '', end_date: '', note: '' })
   const [logging, setLogging] = useState(false)
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear())
@@ -1490,6 +1562,7 @@ function LeaveTab({ employees, leave, onUpdateEmployee, onLeaveAdd, onLeaveRemov
     const emp = employeeById[leaveForm.employee_id]
     const daysUsed = countWorkingDaysInRange(emp?.cycle_anchor_date, leaveForm.start_date, leaveForm.end_date)
     const [row] = await sb.insert('hr_leave', {
+      company_id: companyId,
       employee_id: leaveForm.employee_id,
       start_date: leaveForm.start_date,
       end_date: leaveForm.end_date,
@@ -1685,7 +1758,7 @@ function LeaveTab({ employees, leave, onUpdateEmployee, onLeaveAdd, onLeaveRemov
 // Employees tab — Admin/HR Admin: master list, one lodge at a time.
 // ---------------------------------------------------------------------------
 
-function EmployeesTab({ employees, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee }) {
+function EmployeesTab({ companyId, employees, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee }) {
   const today = parseDateOnly(todayStr())
 
   const thisWeekKey = fmtDateOnly(startOfWeek(today))
@@ -1743,7 +1816,7 @@ function EmployeesTab({ employees, scheduleLocations, leave, onAdd, onUpdate, on
   async function addEmployee() {
     if (!form.first_name.trim() || !form.last_name.trim()) return
     setSaving(true)
-    const [row] = await sb.insert('hr_employees', { ...form, status: 'Active' })
+    const [row] = await sb.insert('hr_employees', { ...form, company_id: companyId, status: 'Active' })
     setForm({ first_name: '', last_name: '', position: '', department: '', start_date: todayStr(), phone: '', email: '' })
     setSaving(false)
     onAdd(row)
@@ -1997,6 +2070,7 @@ function EmployeesTab({ employees, scheduleLocations, leave, onAdd, onUpdate, on
 
 function UniformsTab({
   role,
+  companyId,
   items,
   stockByItem,
   issues,
@@ -2020,6 +2094,7 @@ function UniformsTab({
     setSavingItem(true)
     const [row] = await sb.insert('hr_uniform_items', {
       ...itemForm,
+      company_id: companyId,
       price: Number(itemForm.price || 0),
       supplier_id: itemForm.supplier_id || null,
     })
@@ -2042,6 +2117,7 @@ function UniformsTab({
     const stock = stockByItem[itemId]
     const payload = {
       item_id: itemId,
+      company_id: companyId,
       qty_on_hand: field === 'qty_on_hand' ? Number(value || 0) : stock?.qty_on_hand ?? 0,
       min_units: field === 'min_units' ? Number(value || 0) : stock?.min_units ?? 0,
       max_units: field === 'max_units' ? Number(value || 0) : stock?.max_units ?? 0,
@@ -2057,6 +2133,7 @@ function UniformsTab({
     const [issueRow] = await sb.insert('hr_uniform_issues', {
       item_id: issueForm.item_id,
       employee_id: issueForm.employee_id,
+      company_id: companyId,
       status: 'issued',
       issued_date: todayStr(),
     })
@@ -2064,6 +2141,7 @@ function UniformsTab({
       'hr_uniform_stock',
       {
         item_id: issueForm.item_id,
+        company_id: companyId,
         qty_on_hand: (stock?.qty_on_hand ?? 0) - 1,
         min_units: stock?.min_units ?? 0,
         max_units: stock?.max_units ?? 0,
@@ -2316,7 +2394,7 @@ function UniformsTab({
 // (Staff can log received/lost/damaged too).
 // ---------------------------------------------------------------------------
 
-function LinenTab({ role, items, stock, movements, suppliers, onItemAdd, onItemUpdate, onItemRemove, onStockChange, onMovementAdd }) {
+function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemAdd, onItemUpdate, onItemRemove, onStockChange, onMovementAdd }) {
   const isAdmin = role === 'admin' || role === 'hradmin'
   const [location, setLocation] = useState('ZC')
   const [itemForm, setItemForm] = useState({ name: '', category: 'Towels', size: '', price: '', supplier_id: '' })
@@ -2357,6 +2435,7 @@ function LinenTab({ role, items, stock, movements, suppliers, onItemAdd, onItemU
     setSavingItem(true)
     const [row] = await sb.insert('hr_linen_items', {
       ...itemForm,
+      company_id: companyId,
       price: Number(itemForm.price || 0),
       supplier_id: itemForm.supplier_id || null,
     })
@@ -2380,6 +2459,7 @@ function LinenTab({ role, items, stock, movements, suppliers, onItemAdd, onItemU
     const payload = {
       item_id: itemId,
       location_id: location,
+      company_id: companyId,
       qty_on_hand: field === 'qty_on_hand' ? Number(value || 0) : s?.qty_on_hand ?? 0,
       min_units: field === 'min_units' ? Number(value || 0) : s?.min_units ?? 0,
       max_units: field === 'max_units' ? Number(value || 0) : s?.max_units ?? 0,
@@ -2395,6 +2475,7 @@ function LinenTab({ role, items, stock, movements, suppliers, onItemAdd, onItemU
     const [moveRow] = await sb.insert('hr_linen_movements', {
       item_id: moveForm.item_id,
       location_id: location,
+      company_id: companyId,
       date: todayStr(),
       qty_change: qtyChange,
       reason: moveForm.reason,
@@ -2406,6 +2487,7 @@ function LinenTab({ role, items, stock, movements, suppliers, onItemAdd, onItemU
       {
         item_id: moveForm.item_id,
         location_id: location,
+        company_id: companyId,
         qty_on_hand: (s?.qty_on_hand ?? 0) + qtyChange,
         min_units: s?.min_units ?? 0,
         max_units: s?.max_units ?? 0,
@@ -2716,14 +2798,14 @@ function LinenTab({ role, items, stock, movements, suppliers, onItemAdd, onItemU
 // and Linen.
 // ---------------------------------------------------------------------------
 
-function SuppliersTab({ suppliers, onAdd, onUpdate, onRemove }) {
+function SuppliersTab({ companyId, suppliers, onAdd, onUpdate, onRemove }) {
   const [form, setForm] = useState({ name: '', contact_name: '', phone: '', email: '', notes: '' })
   const [saving, setSaving] = useState(false)
 
   async function addSupplier() {
     if (!form.name.trim()) return
     setSaving(true)
-    const [row] = await sb.insert('hr_suppliers', form)
+    const [row] = await sb.insert('hr_suppliers', { ...form, company_id: companyId })
     setForm({ name: '', contact_name: '', phone: '', email: '', notes: '' })
     setSaving(false)
     onAdd(row)
@@ -3001,7 +3083,7 @@ function OrdersTab({ uniformItems, uniformStockByItem, linenItems, linenStock, s
 // contract is derived (latest start_date), not a stored flag.
 // ---------------------------------------------------------------------------
 
-function ContractsTab({ employees, contracts, onAdd, onUpdate }) {
+function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
   const [selectedEmployeeId, setSelectedEmployeeId] = useState('')
   const [form, setForm] = useState({
     contract_type: 'Permanent',
@@ -3036,6 +3118,7 @@ function ContractsTab({ employees, contracts, onAdd, onUpdate }) {
     if (!selectedEmployeeId || !form.start_date) return
     setSaving(true)
     const [row] = await sb.insert('hr_contracts', {
+      company_id: companyId,
       employee_id: selectedEmployeeId,
       contract_type: form.contract_type,
       start_date: form.start_date,
@@ -3318,7 +3401,7 @@ function ConfirmPopup({ message, onClose }) {
 // Broken/Replace and Return actions on whatever's currently issued.
 // ---------------------------------------------------------------------------
 
-function EmployeeUniformModal({ role, employee, items, stockByItem, issues, onClose, onStockChange, onIssuesAdd, onIssuesUpdate, onIssuesRemove }) {
+function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, issues, onClose, onStockChange, onIssuesAdd, onIssuesUpdate, onIssuesRemove }) {
   const [confirmMsg, setConfirmMsg] = useState(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
   const canDelete = role === 'hradmin'
@@ -3342,6 +3425,7 @@ function EmployeeUniformModal({ role, employee, items, stockByItem, issues, onCl
     const [newIssue] = await sb.insert('hr_uniform_issues', {
       item_id: issue.item_id,
       employee_id: issue.employee_id,
+      company_id: companyId,
       status: 'issued',
       issued_date: todayStr(),
       replaces_issue_id: issue.id,
@@ -3350,6 +3434,7 @@ function EmployeeUniformModal({ role, employee, items, stockByItem, issues, onCl
       'hr_uniform_stock',
       {
         item_id: issue.item_id,
+        company_id: companyId,
         qty_on_hand: (stock?.qty_on_hand ?? 0) - 1,
         min_units: stock?.min_units ?? 0,
         max_units: stock?.max_units ?? 0,
@@ -3369,6 +3454,7 @@ function EmployeeUniformModal({ role, employee, items, stockByItem, issues, onCl
       'hr_uniform_stock',
       {
         item_id: issue.item_id,
+        company_id: companyId,
         qty_on_hand: (stock?.qty_on_hand ?? 0) + 1,
         min_units: stock?.min_units ?? 0,
         max_units: stock?.max_units ?? 0,
@@ -3393,6 +3479,7 @@ function EmployeeUniformModal({ role, employee, items, stockByItem, issues, onCl
         'hr_uniform_stock',
         {
           item_id: issue.item_id,
+          company_id: companyId,
           qty_on_hand: (stock?.qty_on_hand ?? 0) + 1,
           min_units: stock?.min_units ?? 0,
           max_units: stock?.max_units ?? 0,

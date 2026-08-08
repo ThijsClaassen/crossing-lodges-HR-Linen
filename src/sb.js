@@ -4,18 +4,24 @@
 //
 // Points at the SAME Supabase project as the other three apps so all four
 // share one database.
+//
+// Made session-aware 2026-08-08 (HR/Linen 3b of the multi-tenant rebuild):
+// headers() now reads the real Supabase Auth session and sends the user's
+// own access token instead of the anon key, so RLS's auth.uid() resolves to
+// the logged-in user rather than nobody. Same change already made in Food
+// Stock's sb.js.
 
-const SUPABASE_URL =
-  import.meta.env.VITE_SUPABASE_URL || 'https://arrendpmuwdhrfwvokhv.supabase.co'
-const SUPABASE_ANON_KEY =
-  import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_e5hLLlXWBVV8NkNUAz3Blg_8oMwP3Wt'
+import { supabase, SUPABASE_URL, SUPABASE_ANON_KEY } from './supabaseClient.js'
 
 const REST = `${SUPABASE_URL}/rest/v1`
 
-function headers(extra = {}) {
+async function headers(extra = {}) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
   return {
     apikey: SUPABASE_ANON_KEY,
-    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    Authorization: `Bearer ${session?.access_token || SUPABASE_ANON_KEY}`,
     'Content-Type': 'application/json',
     ...extra,
   }
