@@ -4,7 +4,6 @@ import { colors, fonts } from './theme.js'
 import { supabase } from './supabaseClient.js'
 import Login from './Login.jsx'
 import SetPassword from './SetPassword.jsx'
-import ManageUsers from './ManageUsers.jsx'
 import { CompanyProvider, useCompany } from './CompanyContext.jsx'
 
 // ---------------------------------------------------------------------------
@@ -414,7 +413,7 @@ const ADMIN_TABS = [
   { id: 'suppliers', label: 'Suppliers' },
   { id: 'orders', label: 'Orders' },
 ]
-const HRADMIN_TABS = [...ADMIN_TABS, { id: 'contracts', label: 'Contracts' }, { id: 'users', label: 'Users' }]
+const HRADMIN_TABS = [...ADMIN_TABS, { id: 'contracts', label: 'Contracts' }]
 
 function tabsForRole(role) {
   if (role === 'hradmin') return HRADMIN_TABS
@@ -927,7 +926,6 @@ function AuthenticatedApp() {
                 onUpdate={updateLocalContract}
               />
             )}
-            {activeTab === 'users' && role === 'hradmin' && <ManageUsers companyId={companyId} />}
           </>
         )}
       </div>
