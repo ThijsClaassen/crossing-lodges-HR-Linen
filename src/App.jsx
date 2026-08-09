@@ -161,6 +161,25 @@ const styles = {
     cursor: 'pointer',
   }),
   content: { padding: 14, maxWidth: 1100, margin: '0 auto', boxSizing: 'border-box' },
+  desktopTabRow: {
+    display: 'flex',
+    gap: 4,
+    padding: '0 20px',
+    background: colors.panel,
+    borderBottom: `1px solid ${colors.border}`,
+    overflowX: 'auto',
+  },
+  desktopTab: (active) => ({
+    padding: '12px 16px',
+    fontSize: 13,
+    fontWeight: active ? 700 : 500,
+    color: active ? colors.goldLt : colors.muted,
+    background: 'none',
+    border: 'none',
+    borderBottom: active ? `2px solid ${colors.gold}` : '2px solid transparent',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  }),
   card: {
     background: colors.panel,
     border: `1px solid ${colors.border}`,
@@ -732,6 +751,14 @@ function AuthenticatedApp() {
 
   return (
     <div style={styles.app}>
+      <style>{`
+        .desktop-tab-row { display: flex; }
+        .mobile-nav-bar { display: none; }
+        @media (max-width: 768px) {
+          .desktop-tab-row { display: none; }
+          .mobile-nav-bar { display: flex; }
+        }
+      `}</style>
       <div style={styles.header}>
         <div style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <div style={{ ...styles.headerTitle, minWidth: 0, flexShrink: 1 }}>
@@ -764,6 +791,18 @@ function AuthenticatedApp() {
           </div>
         </div>
       </div>
+
+      <nav className="desktop-tab-row" style={styles.desktopTabRow}>
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            style={styles.desktopTab(activeTab === t.id)}
+            onClick={() => setTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </nav>
 
       <div style={styles.content}>
         {error && (
@@ -891,7 +930,7 @@ function AuthenticatedApp() {
         )}
       </div>
 
-      <div style={styles.navBar}>
+      <div className="mobile-nav-bar" style={styles.navBar}>
         <button style={styles.navMenuButton} onClick={() => setMenuOpen(true)}>
           <span>☰</span>
           <span>{TABS.find((t) => t.id === activeTab)?.label || 'Menu'}</span>
@@ -899,7 +938,7 @@ function AuthenticatedApp() {
       </div>
 
       {menuOpen && (
-        <div style={styles.navOverlay} onClick={() => setMenuOpen(false)}>
+        <div className="mobile-nav-bar" style={{ ...styles.navOverlay, display: undefined }} onClick={() => setMenuOpen(false)}>
           <div style={styles.navSheet} onClick={(e) => e.stopPropagation()}>
             <div style={styles.navSheetHeader}>
               <span style={styles.navSheetTitle}>Menu</span>
