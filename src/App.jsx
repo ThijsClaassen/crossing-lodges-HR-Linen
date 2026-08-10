@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { sb, LOCATIONS, UNIFORM_CATEGORIES, LINEN_CATEGORIES, MOVEMENT_REASONS, CONTRACT_TYPES } from './sb.js'
+import { getRealStaffCostOverview } from './staffCostEngine.js'
 import { colors, fonts } from './theme.js'
 import { supabase } from './supabaseClient.js'
 import Login from './Login.jsx'
@@ -413,7 +414,7 @@ const ADMIN_TABS = [
   { id: 'suppliers', label: 'Suppliers' },
   { id: 'orders', label: 'Orders' },
 ]
-const HRADMIN_TABS = [...ADMIN_TABS, { id: 'contracts', label: 'Contracts' }]
+const HRADMIN_TABS = [...ADMIN_TABS, { id: 'contracts', label: 'Contracts' }, { id: 'staffcost', label: 'Staff Cost' }]
 
 function tabsForRole(role) {
   if (role === 'hradmin') return HRADMIN_TABS
@@ -925,6 +926,9 @@ function AuthenticatedApp() {
                 onAdd={addLocalContract}
                 onUpdate={updateLocalContract}
               />
+            )}
+            {activeTab === 'staffcost' && role === 'hradmin' && (
+              <StaffCostTab companyId={companyId} employees={employees} contracts={contracts} scheduleLocations={scheduleLocations} />
             )}
           </>
         )}
@@ -3131,8 +3135,11 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
     salary: '',
     medical_aid: false,
     medical_aid_scheme: '',
+    medical_aid_monthly_cost: '',
     pension_fund: false,
     pension_fund_name: '',
+    pension_fund_monthly_cost: '',
+    housing_monthly_cost: '',
     notes: '',
   })
   const [saving, setSaving] = useState(false)
@@ -3165,8 +3172,11 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
       salary: form.salary === '' ? null : Number(form.salary),
       medical_aid: form.medical_aid,
       medical_aid_scheme: form.medical_aid_scheme || null,
+      medical_aid_monthly_cost: form.medical_aid_monthly_cost === '' ? null : Number(form.medical_aid_monthly_cost),
       pension_fund: form.pension_fund,
       pension_fund_name: form.pension_fund_name || null,
+      pension_fund_monthly_cost: form.pension_fund_monthly_cost === '' ? null : Number(form.pension_fund_monthly_cost),
+      housing_monthly_cost: form.housing_monthly_cost === '' ? null : Number(form.housing_monthly_cost),
       notes: form.notes,
     })
     setForm({
@@ -3176,8 +3186,11 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
       salary: '',
       medical_aid: false,
       medical_aid_scheme: '',
+      medical_aid_monthly_cost: '',
       pension_fund: false,
       pension_fund_name: '',
+      pension_fund_monthly_cost: '',
+      housing_monthly_cost: '',
       notes: '',
     })
     setSaving(false)
@@ -3194,7 +3207,9 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
       <div style={styles.card}>
         <div style={styles.cardTitle}>All employees — current contract</div>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-          Sensitive data — salary, medical aid, and pension details are only visible to HR Admin.
+          Sensitive data — salary, medical aid, and pension details are only visible to HR Admin. "Fixed real
+          cost/mo" is salary + healthcare + pension + housing only — see the Staff Cost tab for the full picture
+          including each employee's share of staff Food and Beverage consumption.
         </div>
         <div style={styles.tableWrap}>
         <table style={styles.table}>
@@ -3207,11 +3222,19 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
               <th style={styles.th}>Salary</th>
               <th style={styles.th}>Medical aid</th>
               <th style={styles.th}>Pension</th>
+              <th style={styles.th}>Housing/mo</th>
+              <th style={styles.th}>Fixed real cost/mo</th>
             </tr>
           </thead>
           <tbody>
             {overview.map(({ employee, contract }) => {
               const days = contract?.end_date ? daysUntil(contract.end_date) : null
+              const fixedRealCost = contract
+                ? Number(contract.salary || 0) +
+                  Number(contract.medical_aid_monthly_cost || 0) +
+                  Number(contract.pension_fund_monthly_cost || 0) +
+                  Number(contract.housing_monthly_cost || 0)
+                : null
               return (
                 <tr key={employee.id}>
                   <td style={styles.td}>
@@ -3232,14 +3255,32 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
                     )}
                   </td>
                   <td style={styles.tdNum}>{contract?.salary ? `R ${fmt(contract.salary)}` : '—'}</td>
-                  <td style={styles.td}>{contract ? (contract.medical_aid ? 'Yes' : 'No') : '—'}</td>
-                  <td style={styles.td}>{contract ? (contract.pension_fund ? 'Yes' : 'No') : '—'}</td>
+                  <td style={styles.td}>
+                    {contract
+                      ? contract.medical_aid
+                        ? contract.medical_aid_monthly_cost
+                          ? `R ${fmt(contract.medical_aid_monthly_cost)}`
+                          : 'Yes'
+                        : 'No'
+                      : '—'}
+                  </td>
+                  <td style={styles.td}>
+                    {contract
+                      ? contract.pension_fund
+                        ? contract.pension_fund_monthly_cost
+                          ? `R ${fmt(contract.pension_fund_monthly_cost)}`
+                          : 'Yes'
+                        : 'No'
+                      : '—'}
+                  </td>
+                  <td style={styles.tdNum}>{contract?.housing_monthly_cost ? `R ${fmt(contract.housing_monthly_cost)}` : '—'}</td>
+                  <td style={styles.tdNum}>{fixedRealCost ? `R ${fmt(fixedRealCost)}` : '—'}</td>
                 </tr>
               )
             })}
             {overview.length === 0 && (
               <tr>
-                <td style={styles.td} colSpan={7}>
+                <td style={styles.td} colSpan={9}>
                   No employees yet — add them on the Employees tab first.
                 </td>
               </tr>
@@ -3317,14 +3358,25 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
                 </select>
               </div>
               {form.medical_aid && (
-                <div>
-                  <label style={styles.label}>Medical aid scheme</label>
-                  <input
-                    style={styles.input}
-                    value={form.medical_aid_scheme}
-                    onChange={(e) => setForm({ ...form, medical_aid_scheme: e.target.value })}
-                  />
-                </div>
+                <>
+                  <div>
+                    <label style={styles.label}>Medical aid scheme</label>
+                    <input
+                      style={styles.input}
+                      value={form.medical_aid_scheme}
+                      onChange={(e) => setForm({ ...form, medical_aid_scheme: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={styles.label}>Medical aid — company cost/month</label>
+                    <input
+                      type="number"
+                      style={styles.input}
+                      value={form.medical_aid_monthly_cost}
+                      onChange={(e) => setForm({ ...form, medical_aid_monthly_cost: e.target.value })}
+                    />
+                  </div>
+                </>
               )}
               <div>
                 <label style={styles.label}>Pension fund</label>
@@ -3338,15 +3390,35 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
                 </select>
               </div>
               {form.pension_fund && (
-                <div>
-                  <label style={styles.label}>Pension fund name</label>
-                  <input
-                    style={styles.input}
-                    value={form.pension_fund_name}
-                    onChange={(e) => setForm({ ...form, pension_fund_name: e.target.value })}
-                  />
-                </div>
+                <>
+                  <div>
+                    <label style={styles.label}>Pension fund name</label>
+                    <input
+                      style={styles.input}
+                      value={form.pension_fund_name}
+                      onChange={(e) => setForm({ ...form, pension_fund_name: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={styles.label}>Pension — company cost/month</label>
+                    <input
+                      type="number"
+                      style={styles.input}
+                      value={form.pension_fund_monthly_cost}
+                      onChange={(e) => setForm({ ...form, pension_fund_monthly_cost: e.target.value })}
+                    />
+                  </div>
+                </>
               )}
+              <div>
+                <label style={styles.label}>Housing cost/month (electricity, water, upkeep etc.)</label>
+                <input
+                  type="number"
+                  style={styles.input}
+                  value={form.housing_monthly_cost}
+                  onChange={(e) => setForm({ ...form, housing_monthly_cost: e.target.value })}
+                />
+              </div>
               <div>
                 <label style={styles.label}>Notes</label>
                 <input style={styles.input} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
@@ -3369,7 +3441,10 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
                     <th style={styles.th}>End</th>
                     <th style={styles.th}>Salary</th>
                     <th style={styles.th}>Medical aid</th>
+                    <th style={styles.th}>Medical/mo</th>
                     <th style={styles.th}>Pension</th>
+                    <th style={styles.th}>Pension/mo</th>
+                    <th style={styles.th}>Housing/mo</th>
                     <th style={styles.th}>Notes</th>
                   </tr>
                 </thead>
@@ -3381,13 +3456,16 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
                       <td style={styles.td}>{c.end_date || '—'}</td>
                       <td style={styles.tdNum}>{c.salary ? `R ${fmt(c.salary)}` : '—'}</td>
                       <td style={styles.td}>{c.medical_aid ? c.medical_aid_scheme || 'Yes' : 'No'}</td>
+                      <td style={styles.tdNum}>{c.medical_aid_monthly_cost ? `R ${fmt(c.medical_aid_monthly_cost)}` : '—'}</td>
                       <td style={styles.td}>{c.pension_fund ? c.pension_fund_name || 'Yes' : 'No'}</td>
+                      <td style={styles.tdNum}>{c.pension_fund_monthly_cost ? `R ${fmt(c.pension_fund_monthly_cost)}` : '—'}</td>
+                      <td style={styles.tdNum}>{c.housing_monthly_cost ? `R ${fmt(c.housing_monthly_cost)}` : '—'}</td>
                       <td style={styles.td}>{c.notes || '—'}</td>
                     </tr>
                   ))}
                   {selectedHistory.length === 0 && (
                     <tr>
-                      <td style={styles.td} colSpan={7}>
+                      <td style={styles.td} colSpan={10}>
                         No contract on record yet — add one above.
                       </td>
                     </tr>
@@ -3399,6 +3477,183 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
           </>
         )}
       </div>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Staff Cost tab — HR Admin only. "Real cost" per employee: salary +
+// healthcare + pension + housing (from their contract, fixed) plus a live
+// share of staff Food and Beverage consumption (from the Food Stock/
+// Beverage Stock apps, divided across whoever was scheduled at that
+// location that week — see staffCostEngine.js for the full calculation).
+// ---------------------------------------------------------------------------
+
+function StaffCostTab({ companyId, employees, contracts, scheduleLocations }) {
+  const today = todayStr()
+  const defaultStart = (() => {
+    const d = new Date(`${today}T00:00:00`)
+    d.setDate(d.getDate() - 28)
+    return d.toISOString().slice(0, 10)
+  })()
+  const [startDate, setStartDate] = useState(defaultStart)
+  const [endDate, setEndDate] = useState(today)
+  const [result, setResult] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  async function run() {
+    setLoading(true)
+    setError('')
+    try {
+      const data = await getRealStaffCostOverview({ companyId, employees, contracts, scheduleLocations, startDate, endDate })
+      setResult(data)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (companyId) run()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId])
+
+  const empName = (id) => {
+    const e = employees.find((x) => x.id === id)
+    return e ? `${e.first_name} ${e.last_name}` : 'Unknown'
+  }
+
+  const sortedEmployeeRows = useMemo(() => {
+    if (!result) return []
+    return [...result.employeeRows].sort((a, b) => b.totalMonthly - a.totalMonthly)
+  }, [result])
+
+  const grandTotal = sortedEmployeeRows.reduce((s, r) => s + r.totalMonthly, 0)
+
+  return (
+    <>
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Real Staff Cost</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Salary + healthcare + pension + housing (from Contracts) plus each employee's share of staff Food and
+          Beverage usage, sourced live from the Food Stock and Beverage Stock apps (any issue logged with reason
+          "Staff") and divided by however many staff were scheduled at that location each week. Employees with no
+          Schedule entries in the chosen range show a Food/Bev share of R0 — add them to the Schedule tab to include
+          them.
+        </div>
+        <div style={styles.formGrid}>
+          <div>
+            <label style={styles.label}>From</label>
+            <input type="date" style={styles.input} value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          </div>
+          <div>
+            <label style={styles.label}>To</label>
+            <input type="date" style={styles.input} value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+          </div>
+        </div>
+        <button style={styles.button} onClick={run} disabled={loading}>
+          {loading ? 'Calculating…' : 'Run'}
+        </button>
+        {error && <div style={{ color: colors.danger, marginTop: 8 }}>{error}</div>}
+      </div>
+
+      {result && (
+        <>
+          <div style={styles.card}>
+            <div style={styles.cardTitle}>Food + Beverage cost per head, by location</div>
+            <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+              {result.weeks.length} week{result.weeks.length === 1 ? '' : 's'} in range, weeks starting Monday. Monthly
+              figure is the weekly average projected ×4.345 (weeks/month), same convention used everywhere else.
+            </div>
+            <div style={styles.tableWrap}>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Location</th>
+                    <th style={styles.th}>Total Food cost</th>
+                    <th style={styles.th}>Total Beverage cost</th>
+                    <th style={styles.th}>Weeks with headcount</th>
+                    <th style={styles.th}>Avg cost/head/week</th>
+                    <th style={styles.th}>Avg cost/head/month</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.locationSummary.map((r) => (
+                    <tr key={r.location}>
+                      <td style={styles.td}>{r.location}</td>
+                      <td style={styles.tdNum}>R {fmt(r.totalFood)}</td>
+                      <td style={styles.tdNum}>R {fmt(r.totalBev)}</td>
+                      <td style={styles.td}>
+                        {r.weeksWithHeadcount} / {r.weeksCovered}
+                      </td>
+                      <td style={styles.tdNum}>{r.avgPerHeadWeekly !== null ? `R ${fmt(r.avgPerHeadWeekly)}` : '—'}</td>
+                      <td style={styles.tdNum}>{r.avgPerHeadMonthly !== null ? `R ${fmt(r.avgPerHeadMonthly)}` : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style={styles.card}>
+            <div style={styles.cardTitle}>Real cost per employee, per month</div>
+            <div style={styles.tableWrap}>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Employee</th>
+                    <th style={styles.th}>Salary</th>
+                    <th style={styles.th}>Healthcare</th>
+                    <th style={styles.th}>Pension</th>
+                    <th style={styles.th}>Housing</th>
+                    <th style={styles.th}>Food + Bev share</th>
+                    <th style={styles.th}>Real cost/month</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedEmployeeRows.map((r) => (
+                    <tr key={r.employee.id}>
+                      <td style={styles.td}>{empName(r.employee.id)}</td>
+                      <td style={styles.tdNum}>{r.salary ? `R ${fmt(r.salary)}` : '—'}</td>
+                      <td style={styles.tdNum}>{r.healthcare ? `R ${fmt(r.healthcare)}` : '—'}</td>
+                      <td style={styles.tdNum}>{r.pension ? `R ${fmt(r.pension)}` : '—'}</td>
+                      <td style={styles.tdNum}>{r.housing ? `R ${fmt(r.housing)}` : '—'}</td>
+                      <td style={styles.tdNum}>
+                        {r.hasScheduleData ? `R ${fmt(r.foodBevMonthly)}` : <span style={styles.badge('neutral')}>no schedule data</span>}
+                      </td>
+                      <td style={styles.tdNum}>
+                        <strong>R {fmt(r.totalMonthly)}</strong>
+                      </td>
+                    </tr>
+                  ))}
+                  {sortedEmployeeRows.length === 0 && (
+                    <tr>
+                      <td style={styles.td} colSpan={7}>
+                        No employees yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+                {sortedEmployeeRows.length > 0 && (
+                  <tfoot>
+                    <tr>
+                      <td style={styles.td}>
+                        <strong>Total</strong>
+                      </td>
+                      <td style={styles.td} colSpan={5} />
+                      <td style={styles.tdNum}>
+                        <strong>R {fmt(grandTotal)}</strong>
+                      </td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          </div>
+        </>
+      )}
     </>
   )
 }
