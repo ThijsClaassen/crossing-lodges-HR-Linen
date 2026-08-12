@@ -3708,6 +3708,22 @@ function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, i
     [issues, employee.id]
   )
 
+  // Counts what this employee is currently holding (status 'issued' only —
+  // broken/returned rows are closed history, not stock they still have),
+  // grouped by the item's category, so it's quick to see "3 shirts, 2
+  // pants" without counting rows in the table below.
+  const currentByCategory = useMemo(() => {
+    const counts = {}
+    empIssues
+      .filter((i) => i.status === 'issued')
+      .forEach((i) => {
+        const cat = items.find((x) => x.id === i.item_id)?.category || 'Other'
+        counts[cat] = (counts[cat] || 0) + 1
+      })
+    return Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0]))
+  }, [empIssues, items])
+  const totalCurrent = currentByCategory.reduce((s, [, n]) => s + n, 0)
+
   const itemName = (id) => {
     const it = items.find((i) => i.id === id)
     return it ? `${it.name}${it.size ? ` (${it.size})` : ''}` : 'Unknown item'
@@ -3814,6 +3830,20 @@ function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, i
             Close
           </button>
         </div>
+        {currentByCategory.length > 0 ? (
+          <div style={{ ...styles.row, flexWrap: 'wrap', gap: 6, marginTop: 8, marginBottom: 10 }}>
+            {currentByCategory.map(([cat, n]) => (
+              <span key={cat} style={styles.badge('neutral')}>
+                {cat}: {n}
+              </span>
+            ))}
+            <span style={{ ...styles.badge('good'), fontWeight: 700 }}>Total: {totalCurrent}</span>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: colors.muted, marginTop: 8, marginBottom: 10 }}>
+            Not currently holding any issued items.
+          </div>
+        )}
         {canDelete && (
           <div style={{ fontSize: 11, color: colors.muted, marginBottom: 8 }}>
             As HR Admin you can delete a row here to clean up a mistaken entry — deleting a still-issued
