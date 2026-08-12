@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { sb, LOCATIONS, UNIFORM_CATEGORIES, LINEN_CATEGORIES, MOVEMENT_REASONS, CONTRACT_TYPES } from './sb.js'
 import { getRealStaffCostOverview } from './staffCostEngine.js'
+import { guestsByLodgeAndDate, requiredCountFor } from './staffingCoverageEngine.js'
 import { colors, fonts } from './theme.js'
 import { supabase } from './supabaseClient.js'
 import Login from './Login.jsx'
@@ -559,6 +560,7 @@ function AuthenticatedApp() {
   // Which day the Schedule tab's display weeks start on (0=Sun..6=Sat).
   // Defaults to Monday until a company sets its own via hr_settings.
   const [weekStartDay, setWeekStartDay] = useState(1)
+  const [staffingRatios, setStaffingRatios] = useState([])
 
   async function loadAll() {
     setLoading(true)
@@ -576,13 +578,14 @@ function AuthenticatedApp() {
         sb.select('hr_schedule_locations', { company_id: companyId }, {}),
         sb.select('hr_leave', { company_id: companyId }, { order: 'start_date.desc' }),
         sb.select('hr_settings', { company_id: companyId }, {}),
+        sb.select('hr_staffing_ratios', { company_id: companyId }, { order: 'position.asc,min_guests.asc' }),
       ]
       // Contracts hold salary/medical aid/pension — only ever fetched for the
       // HR Admin role, so that data never transits to a Staff/Admin session.
       const results = await Promise.all(
         role === 'hradmin' ? [...base, sb.select('hr_contracts', { company_id: companyId }, {})] : base
       )
-      const [empRes, supRes, uItemsRes, uStockRes, uIssuesRes, lItemsRes, lStockRes, lMoveRes, schedLocRes, leaveRes, settingsRes, conRes] =
+      const [empRes, supRes, uItemsRes, uStockRes, uIssuesRes, lItemsRes, lStockRes, lMoveRes, schedLocRes, leaveRes, settingsRes, ratiosRes, conRes] =
         results
 
       setEmployees(empRes || [])
@@ -598,6 +601,7 @@ function AuthenticatedApp() {
       // No row yet for this company (fresh install before add_hr_settings.sql
       // has ever been upserted) — fall back to Monday, the old behaviour.
       setWeekStartDay(settingsRes?.[0]?.week_start_day ?? 1)
+      setStaffingRatios(ratiosRes || [])
       setContracts(conRes || [])
     } catch (e) {
       setError(e.message)
@@ -712,6 +716,15 @@ function AuthenticatedApp() {
     setWeekStartDay(day) // optimistic — the grid should snap immediately
     const [row] = await sb.upsert('hr_settings', { company_id: companyId, week_start_day: day }, 'company_id')
     if (row) setWeekStartDay(row.week_start_day)
+  }
+
+  async function addStaffingRatio(tier) {
+    const [row] = await sb.insert('hr_staffing_ratios', { ...tier, company_id: companyId })
+    setStaffingRatios((prev) => [...prev, row].sort((a, b) => a.position.localeCompare(b.position) || a.min_guests - b.min_guests))
+  }
+  async function removeStaffingRatio(id) {
+    await sb.remove('hr_staffing_ratios', { id })
+    setStaffingRatios((prev) => prev.filter((r) => r.id !== id))
   }
 
   const employeeById = useMemo(() => {
@@ -876,6 +889,9 @@ function AuthenticatedApp() {
                 leave={leave}
                 weekStartDay={weekStartDay}
                 onWeekStartDayChange={saveWeekStartDay}
+                staffingRatios={staffingRatios}
+                onAddStaffingRatio={addStaffingRatio}
+                onRemoveStaffingRatio={removeStaffingRatio}
                 onUpdateEmployee={updateLocalEmployee}
                 onScheduleLocationChange={upsertLocalScheduleLocation}
               />
@@ -1288,12 +1304,21 @@ function ScheduleTab({
   leave,
   weekStartDay,
   onWeekStartDayChange,
+  staffingRatios,
+  onAddStaffingRatio,
+  onRemoveStaffingRatio,
   onUpdateEmployee,
   onScheduleLocationChange,
 }) {
   const today = parseDateOnly(todayStr())
   const [weekStart, setWeekStart] = useState(() => startOfWeek(today, weekStartDay))
   const [positionFilter, setPositionFilter] = useState('')
+  const [coverageLodge, setCoverageLodge] = useState(LOCATIONS[0]?.id || '')
+  const [bookings, setBookings] = useState([])
+  const [bookingsLoading, setBookingsLoading] = useState(false)
+  const [bookingsError, setBookingsError] = useState('')
+  const [ratioForm, setRatioForm] = useState({ position: '', min_guests: '', max_guests: '', required_count: '' })
+  const [savingRatio, setSavingRatio] = useState(false)
 
   // Re-snap the visible grid whenever the company's block-start day changes
   // (loaded async after mount, or changed live from the dropdown below) so
@@ -1358,6 +1383,103 @@ function ScheduleTab({
   }
 
   const positions = useMemo(() => Array.from(new Set(employees.map(positionOf))).sort(), [employees])
+
+  // Guest counts only need to cover whatever's currently on screen —
+  // refetched whenever the visible window moves (Earlier/Later/Today) or
+  // re-aligns to a new weekStartDay. revenue_bookings lives in this same
+  // shared Supabase project (populated by the Finance Dashboard's Revenue
+  // Importer) — read cross-app the same way staffCostEngine.js already
+  // reads food_issues/bev_issues for the Staff Cost tab.
+  useEffect(() => {
+    const windowStart = fmtDateOnly(weeks[0].start)
+    const windowEnd = fmtDateOnly(addDays(weeks[weeks.length - 1].start, 6))
+    setBookingsLoading(true)
+    setBookingsError('')
+    sb.select(
+      'revenue_bookings',
+      { company_id: companyId, departure_date: `gte.${windowStart}`, arrival_date: `lte.${windowEnd}` },
+      {}
+    )
+      .then((rows) => setBookings(rows || []))
+      .catch((err) => setBookingsError(err.message || 'Could not load revenue data for the coverage check.'))
+      .finally(() => setBookingsLoading(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId, weeks])
+
+  const guestsMap = useMemo(() => guestsByLodgeAndDate(bookings), [bookings])
+
+  const ratioPositions = useMemo(() => Array.from(new Set((staffingRatios || []).map((r) => r.position))).sort(), [staffingRatios])
+
+  // Only counts staff explicitly assigned to `lodge` for the week
+  // containing `date` (via the lodge picker on the day-strips above) — an
+  // employee with no lodge picked that week doesn't count toward any
+  // lodge's coverage, since we genuinely don't know where they are.
+  function actualCountFor(position, lodge, date) {
+    let count = 0
+    for (const e of employees) {
+      if (positionOf(e) !== position) continue
+      if (dayInfo(e, date).status !== 'on') continue
+      const loc = locationByKey[`${e.id}|${mondayKeyOf(date)}`]
+      if (loc?.location_id === lodge) count++
+    }
+    return count
+  }
+
+  async function submitRatio(e) {
+    e.preventDefault()
+    if (!ratioForm.position || ratioForm.min_guests === '' || ratioForm.required_count === '') return
+    setSavingRatio(true)
+    try {
+      await onAddStaffingRatio({
+        position: ratioForm.position,
+        min_guests: Number(ratioForm.min_guests),
+        max_guests: ratioForm.max_guests === '' ? null : Number(ratioForm.max_guests),
+        required_count: Number(ratioForm.required_count),
+      })
+      // Keep the position selected so adding the next tier in the same
+      // ladder (e.g. 10-20 right after 1-9) doesn't need re-picking it.
+      setRatioForm({ position: ratioForm.position, min_guests: '', max_guests: '', required_count: '' })
+    } finally {
+      setSavingRatio(false)
+    }
+  }
+
+  function renderCoverageDayStrip(position, w) {
+    const cells = w.days.map((d) => {
+      const dateKey = fmtDateOnly(d)
+      const guests = guestsMap[`${coverageLodge}|${dateKey}`] || 0
+      const required = requiredCountFor(staffingRatios, position, guests)
+      const actual = actualCountFor(position, coverageLodge, d)
+      const short = required !== null && actual < required
+      const color = required === null || guests <= 0 ? 'transparent' : short ? colors.danger : colors.ok
+      const title =
+        required === null
+          ? `${dateKey} — no ratio configured for ${position}`
+          : `${dateKey} — ${Math.round(guests)} guest${Math.round(guests) === 1 ? '' : 's'} at ${coverageLodge}, need ${required}, have ${actual}${short ? ' — SHORT' : ''}`
+      return { dateKey, guests, required, actual, short, color, title }
+    })
+    const anyShort = cells.some((c) => c.short)
+    return (
+      <td style={styles.td} key={fmtDateOnly(w.start)}>
+        <div style={{ display: 'flex', gap: 2, marginBottom: anyShort ? 4 : 0 }}>
+          {cells.map((c, i) => (
+            <div
+              key={i}
+              title={c.title}
+              style={{
+                width: 10,
+                height: 16,
+                borderRadius: 2,
+                background: c.color,
+                border: c.color === 'transparent' ? `1px dashed ${colors.border}` : 'none',
+              }}
+            />
+          ))}
+        </div>
+        {anyShort && <span style={{ ...styles.badge('bad'), fontSize: 10 }}>{cells.filter((c) => c.short).length} short</span>}
+      </td>
+    )
+  }
 
   const groupedEmployees = useMemo(() => {
     const pool = positionFilter ? employees.filter((e) => positionOf(e) === positionFilter) : employees
@@ -1520,6 +1642,156 @@ function ScheduleTab({
             </tbody>
           </table>
         </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Staffing ratios</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Define how many of each position you need for a given number of guests (e.g. 1 Ranger for
+          1-9 guests, 2 for 10-20). The Staffing coverage card below flags any day that falls short,
+          per lodge.
+        </div>
+        <div style={styles.formGrid}>
+          <div>
+            <label style={styles.label}>Position</label>
+            <select
+              style={styles.input}
+              value={ratioForm.position}
+              onChange={(e) => setRatioForm({ ...ratioForm, position: e.target.value })}
+            >
+              <option value="">Choose position…</option>
+              {positions.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={styles.label}>Min guests</label>
+            <input
+              type="number"
+              min="0"
+              style={styles.input}
+              value={ratioForm.min_guests}
+              onChange={(e) => setRatioForm({ ...ratioForm, min_guests: e.target.value })}
+            />
+          </div>
+          <div>
+            <label style={styles.label}>Max guests (blank = and above)</label>
+            <input
+              type="number"
+              min="0"
+              style={styles.input}
+              value={ratioForm.max_guests}
+              onChange={(e) => setRatioForm({ ...ratioForm, max_guests: e.target.value })}
+            />
+          </div>
+          <div>
+            <label style={styles.label}>Staff required</label>
+            <input
+              type="number"
+              min="0"
+              style={styles.input}
+              value={ratioForm.required_count}
+              onChange={(e) => setRatioForm({ ...ratioForm, required_count: e.target.value })}
+            />
+          </div>
+        </div>
+        <button
+          style={styles.button}
+          onClick={submitRatio}
+          disabled={savingRatio || !ratioForm.position || ratioForm.min_guests === '' || ratioForm.required_count === ''}
+        >
+          {savingRatio ? 'Saving…' : 'Add tier'}
+        </button>
+
+        {ratioPositions.length > 0 && (
+          <div style={{ ...styles.tableWrap, marginTop: 14 }}>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>Position</th>
+                  <th style={styles.th}>Guests</th>
+                  <th style={styles.th}>Staff required</th>
+                  <th style={styles.th}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {ratioPositions.map((pos) => (
+                  <Fragment key={pos}>
+                    {staffingRatios
+                      .filter((r) => r.position === pos)
+                      .sort((a, b) => a.min_guests - b.min_guests)
+                      .map((r) => (
+                        <tr key={r.id}>
+                          <td style={styles.td}>{r.position}</td>
+                          <td style={styles.td}>
+                            {r.min_guests}
+                            {r.max_guests == null ? '+' : `–${r.max_guests}`}
+                          </td>
+                          <td style={styles.td}>{r.required_count}</td>
+                          <td style={styles.td}>
+                            <button style={styles.buttonGhost} onClick={() => onRemoveStaffingRatio(r.id)}>
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div style={styles.card}>
+        <div style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <div style={styles.cardTitle}>Staffing coverage</div>
+          <select style={{ ...styles.smallInput, width: 90 }} value={coverageLodge} onChange={(e) => setCoverageLodge(e.target.value)}>
+            {LOCATIONS.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.id}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Per day, per position: guest counts come from imported revenue bookings (Confirmed/Checked
+          Out, split evenly across each stay's nights), staff counts come from who's on and assigned
+          to {coverageLodge || 'this lodge'} that week above. Red = short-staffed that night, green =
+          covered, dashed = no guests that night or no ratio configured for that position.
+        </div>
+        {bookingsLoading && <p className="message">Loading guest counts…</p>}
+        {bookingsError && <p style={{ color: colors.danger }}>{bookingsError}</p>}
+        {!bookingsLoading && ratioPositions.length === 0 && (
+          <p className="message">Add at least one staffing ratio above to see coverage flags.</p>
+        )}
+        {!bookingsLoading && ratioPositions.length > 0 && (
+          <div style={styles.tableWrap}>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>Position</th>
+                  {weeks.map((w) => (
+                    <th style={styles.th} key={fmtDateOnly(w.start)}>
+                      {w.start.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' })}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {ratioPositions.map((position) => (
+                  <tr key={position}>
+                    <td style={styles.td}>{position}</td>
+                    {weeks.map((w) => renderCoverageDayStrip(position, w))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <div style={styles.card}>
