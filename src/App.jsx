@@ -71,12 +71,19 @@ function addDays(date, n) {
   return d
 }
 
-// Monday of the calendar week containing `date`.
-function startOfWeek(date) {
-  const day = date.getDay() // 0 = Sun .. 6 = Sat
-  const diff = day === 0 ? -6 : 1 - day
-  return addDays(date, diff)
+// Start of the display "week" containing `date`, per a configurable start
+// day (0 = Sun .. 6 = Sat, same convention as Date.getDay()). Defaults to
+// Monday, matching the old hardcoded behaviour. This is purely a display
+// grouping — cycleStatusForDate below never uses it, so changing it can't
+// affect anyone's actual on/off status, only how the schedule/headcount
+// grid buckets days for the view.
+function startOfWeek(date, weekStartDay = 1) {
+  const day = date.getDay()
+  const diff = (day - weekStartDay + 7) % 7
+  return addDays(date, -diff)
 }
+
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 
 // { status: 'on' | 'off' | 'none', blockStart? } for a single day.
 // blockStart ('YYYY-MM-DD') is only set when status is 'on' — the date the
@@ -549,6 +556,9 @@ function AuthenticatedApp() {
   const [contracts, setContracts] = useState([])
   const [scheduleLocations, setScheduleLocations] = useState([])
   const [leave, setLeave] = useState([])
+  // Which day the Schedule tab's display weeks start on (0=Sun..6=Sat).
+  // Defaults to Monday until a company sets its own via hr_settings.
+  const [weekStartDay, setWeekStartDay] = useState(1)
 
   async function loadAll() {
     setLoading(true)
@@ -565,13 +575,14 @@ function AuthenticatedApp() {
         sb.select('hr_linen_movements', { company_id: companyId }, { order: 'date.desc' }),
         sb.select('hr_schedule_locations', { company_id: companyId }, {}),
         sb.select('hr_leave', { company_id: companyId }, { order: 'start_date.desc' }),
+        sb.select('hr_settings', { company_id: companyId }, {}),
       ]
       // Contracts hold salary/medical aid/pension — only ever fetched for the
       // HR Admin role, so that data never transits to a Staff/Admin session.
       const results = await Promise.all(
         role === 'hradmin' ? [...base, sb.select('hr_contracts', { company_id: companyId }, {})] : base
       )
-      const [empRes, supRes, uItemsRes, uStockRes, uIssuesRes, lItemsRes, lStockRes, lMoveRes, schedLocRes, leaveRes, conRes] =
+      const [empRes, supRes, uItemsRes, uStockRes, uIssuesRes, lItemsRes, lStockRes, lMoveRes, schedLocRes, leaveRes, settingsRes, conRes] =
         results
 
       setEmployees(empRes || [])
@@ -584,6 +595,9 @@ function AuthenticatedApp() {
       setLinenMovements(lMoveRes || [])
       setScheduleLocations(schedLocRes || [])
       setLeave(leaveRes || [])
+      // No row yet for this company (fresh install before add_hr_settings.sql
+      // has ever been upserted) — fall back to Monday, the old behaviour.
+      setWeekStartDay(settingsRes?.[0]?.week_start_day ?? 1)
       setContracts(conRes || [])
     } catch (e) {
       setError(e.message)
@@ -692,6 +706,12 @@ function AuthenticatedApp() {
   }
   function removeLocalLeave(id) {
     setLeave((prev) => prev.filter((l) => l.id !== id))
+  }
+
+  async function saveWeekStartDay(day) {
+    setWeekStartDay(day) // optimistic — the grid should snap immediately
+    const [row] = await sb.upsert('hr_settings', { company_id: companyId, week_start_day: day }, 'company_id')
+    if (row) setWeekStartDay(row.week_start_day)
   }
 
   const employeeById = useMemo(() => {
@@ -854,6 +874,8 @@ function AuthenticatedApp() {
                 employees={employees}
                 scheduleLocations={scheduleLocations}
                 leave={leave}
+                weekStartDay={weekStartDay}
+                onWeekStartDayChange={saveWeekStartDay}
                 onUpdateEmployee={updateLocalEmployee}
                 onScheduleLocationChange={upsertLocalScheduleLocation}
               />
@@ -1259,10 +1281,28 @@ function dayStatusColor(status) {
   return 'transparent' // 'none' — no cycle set for this employee
 }
 
-function ScheduleTab({ companyId, employees, scheduleLocations, leave, onUpdateEmployee, onScheduleLocationChange }) {
+function ScheduleTab({
+  companyId,
+  employees,
+  scheduleLocations,
+  leave,
+  weekStartDay,
+  onWeekStartDayChange,
+  onUpdateEmployee,
+  onScheduleLocationChange,
+}) {
   const today = parseDateOnly(todayStr())
-  const [weekStart, setWeekStart] = useState(() => startOfWeek(today))
+  const [weekStart, setWeekStart] = useState(() => startOfWeek(today, weekStartDay))
   const [positionFilter, setPositionFilter] = useState('')
+
+  // Re-snap the visible grid whenever the company's block-start day changes
+  // (loaded async after mount, or changed live from the dropdown below) so
+  // the display stays aligned to real rotation boundaries instead of the
+  // stale Monday-based grid computed before hr_settings came back.
+  useEffect(() => {
+    setWeekStart(startOfWeek(today, weekStartDay))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weekStartDay])
 
   const weeks = useMemo(
     () =>
@@ -1294,7 +1334,11 @@ function ScheduleTab({ companyId, employees, scheduleLocations, leave, onUpdateE
   }
 
   // Keyed by calendar week (Monday) rather than by working block — a lodge
-  // can now change week to week within the same 21-day stretch.
+  // can now change week to week within the same 21-day stretch. Always
+  // Monday-anchored regardless of the display's own weekStartDay setting
+  // (see mondayKeyOf below) — staffCostEngine.js independently computes
+  // this same Monday key from food/bev issue dates to join headcount
+  // against this table, so the stored convention must never move.
   async function saveWeekLocation(employeeId, weekStartStr, locationId) {
     if (!locationId) return
     const [row] = await sb.upsert(
@@ -1303,6 +1347,14 @@ function ScheduleTab({ companyId, employees, scheduleLocations, leave, onUpdateE
       'employee_id,week_start_date'
     )
     onScheduleLocationChange(row)
+  }
+
+  // Converts any display week's start date to the Monday-anchored key
+  // hr_schedule_locations is actually keyed by — a Friday-start display
+  // week still maps to exactly one stable Monday key, so this stays 1:1
+  // with the visible blocks no matter what weekStartDay is set to.
+  function mondayKeyOf(date) {
+    return fmtDateOnly(startOfWeek(date))
   }
 
   const positions = useMemo(() => Array.from(new Set(employees.map(positionOf))).sort(), [employees])
@@ -1335,10 +1387,11 @@ function ScheduleTab({ companyId, employees, scheduleLocations, leave, onUpdateE
   function renderDayStrip(e, w) {
     const dayStatuses = w.days.map((d) => ({ date: d, ...dayInfo(e, d) }))
     const hasOn = dayStatuses.some((d) => d.status === 'on')
-    const weekKey = fmtDateOnly(w.start)
-    const loc = locationByKey[`${e.id}|${weekKey}`]
+    const displayKey = fmtDateOnly(w.start)
+    const storageKey = mondayKeyOf(w.start)
+    const loc = locationByKey[`${e.id}|${storageKey}`]
     return (
-      <td style={styles.td} key={weekKey}>
+      <td style={styles.td} key={displayKey}>
         <div style={{ display: 'flex', gap: 2, marginBottom: hasOn ? 4 : 0 }}>
           {dayStatuses.map((d, i) => (
             <div
@@ -1358,7 +1411,7 @@ function ScheduleTab({ companyId, employees, scheduleLocations, leave, onUpdateE
           <select
             style={{ ...styles.smallInput, width: 68, padding: '3px 5px', fontSize: 11 }}
             value={loc?.location_id || ''}
-            onChange={(ev) => saveWeekLocation(e.id, weekKey, ev.target.value)}
+            onChange={(ev) => saveWeekLocation(e.id, storageKey, ev.target.value)}
           >
             <option value="">—</option>
             {LOCATIONS.map((l) => (
@@ -1381,7 +1434,7 @@ function ScheduleTab({ companyId, employees, scheduleLocations, leave, onUpdateE
             <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, -WEEKS_SHOWN * 7))}>
               ← Earlier
             </button>
-            <button style={styles.buttonGhost} onClick={() => setWeekStart(startOfWeek(today))}>
+            <button style={styles.buttonGhost} onClick={() => setWeekStart(startOfWeek(today, weekStartDay))}>
               Today
             </button>
             <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, WEEKS_SHOWN * 7))}>
@@ -1390,20 +1443,42 @@ function ScheduleTab({ companyId, employees, scheduleLocations, leave, onUpdateE
           </div>
         </div>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-          Each strip is one week, Mon → Sun, one square per day. Green = working, grey = off, gold =
-          on leave. Pick a lodge for any working week and it applies to that whole week — it can be
-          changed week to week within the same rotation.
+          Each strip is one week, {WEEKDAY_NAMES[weekStartDay]} → {WEEKDAY_NAMES[(weekStartDay + 6) % 7]}, one
+          square per day. Green = working, grey = off, gold = on leave. Pick a lodge for any working
+          week and it applies to that whole week — it can be changed week to week within the same
+          rotation.
         </div>
-        <div>
-          <label style={styles.label}>Filter by position</label>
-          <select style={{ ...styles.input, maxWidth: 220 }} value={positionFilter} onChange={(e) => setPositionFilter(e.target.value)}>
-            <option value="">All positions</option>
-            {positions.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </select>
+        <div style={{ ...styles.row, alignItems: 'flex-end' }}>
+          <div>
+            <label style={styles.label}>Filter by position</label>
+            <select style={{ ...styles.input, maxWidth: 220 }} value={positionFilter} onChange={(e) => setPositionFilter(e.target.value)}>
+              <option value="">All positions</option>
+              {positions.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={styles.label}>Week starts on</label>
+            <select
+              style={{ ...styles.input, maxWidth: 160 }}
+              value={weekStartDay}
+              onChange={(e) => onWeekStartDayChange(Number(e.target.value))}
+            >
+              {WEEKDAY_NAMES.map((name, idx) => (
+                <option key={idx} value={idx}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: colors.muted, marginTop: 6 }}>
+          Align this to the day your rotation blocks actually start (e.g. Friday) so the weekly
+          headcount below reflects real on/off blocks instead of always showing everyone as
+          available.
         </div>
       </div>
 
@@ -1804,6 +1879,11 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
 function EmployeesTab({ companyId, employees, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee }) {
   const today = parseDateOnly(todayStr())
 
+  // hr_schedule_locations.week_start_date is always Monday-anchored no
+  // matter what display "week starts on" is set to in ScheduleTab (see
+  // mondayKeyOf there) — staffCostEngine.js independently computes the
+  // same Monday key from food/bev issue dates to join against this table,
+  // so this lookup must stay on the default (Monday) alignment too.
   const thisWeekKey = fmtDateOnly(startOfWeek(today))
 
   const locationByKey = useMemo(() => {
