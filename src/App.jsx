@@ -1365,6 +1365,44 @@ function dayStatusColor(status) {
   return 'transparent' // 'none' — no cycle set for this employee
 }
 
+// Foldable card wrapper (2026-08-17) — used for the Schedule tab's less-
+// frequently-needed blocks (Weekly schedule controls, Staffing ratios,
+// Allocate lodge, Cycles) so the page opens straight to the two blocks
+// Thijs actually wants at a glance (Staffing coverage, Headcount by
+// position) instead of a long always-expanded scroll. `defaultOpen` is
+// false everywhere it's used, per "so they won't always open automatically."
+// `headerExtra` is for header-row controls (e.g. a lodge picker) that must
+// stay clickable without toggling the fold — stopPropagation keeps clicks
+// on it from bubbling to the header's own onClick.
+function CollapsibleCard({ title, defaultOpen = false, headerExtra, children }) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div style={styles.card}>
+      <div
+        style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap', cursor: 'pointer' }}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <div style={{ ...styles.row, gap: 8 }}>
+          <span
+            style={{
+              fontSize: 10,
+              color: colors.muted,
+              display: 'inline-block',
+              transition: 'transform .15s',
+              transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
+            }}
+          >
+            ▶
+          </span>
+          <div style={styles.cardTitle}>{title}</div>
+        </div>
+        {headerExtra && <div onClick={(e) => e.stopPropagation()}>{headerExtra}</div>}
+      </div>
+      {open && <div style={{ marginTop: 10 }}>{children}</div>}
+    </div>
+  )
+}
+
 function ScheduleTab({
   companyId,
   employees,
@@ -1632,59 +1670,58 @@ function ScheduleTab({
 
   return (
     <>
+      {/* Order + fold state (2026-08-17, per Thijs): Staffing coverage and
+          Headcount by position stay first and always open — they're the
+          at-a-glance blocks. Everything else (Allocate lodge, Weekly
+          schedule controls, Staffing ratios, Cycles) is folded shut by
+          default via CollapsibleCard, so the tab doesn't open to a long
+          scroll of stuff that's only occasionally touched. */}
       <div style={styles.card}>
         <div style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap' }}>
-          <div style={styles.cardTitle}>Weekly schedule</div>
-          <div style={{ ...styles.row, gap: 6 }}>
-            <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, -WEEKS_SHOWN * 7))}>
-              ← Earlier
-            </button>
-            <button style={styles.buttonGhost} onClick={() => setWeekStart(startOfWeek(today, weekStartDay))}>
-              Today
-            </button>
-            <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, WEEKS_SHOWN * 7))}>
-              Later →
-            </button>
-          </div>
+          <div style={styles.cardTitle}>Staffing coverage</div>
+          <select style={{ ...styles.smallInput, width: 90 }} value={coverageLodge} onChange={(e) => setCoverageLodge(e.target.value)}>
+            {LOCATIONS.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.id}
+              </option>
+            ))}
+          </select>
         </div>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-          Each strip is one week, {WEEKDAY_NAMES[weekStartDay]} → {WEEKDAY_NAMES[(weekStartDay + 6) % 7]}, one
-          square per day. Green = working, grey = off, gold = on leave. Pick a lodge for any working
-          week and it applies to that whole week — it can be changed week to week within the same
-          rotation.
+          Per day, per position: guest counts come from imported revenue bookings (Confirmed/Checked
+          Out, split evenly across each stay's nights), staff counts come from who's on and assigned
+          to {coverageLodge || 'this lodge'} that week above. Red = short-staffed that night, green =
+          covered, dashed = no guests that night or no ratio configured for that position.
         </div>
-        <div style={{ ...styles.row, alignItems: 'flex-end' }}>
-          <div>
-            <label style={styles.label}>Filter by position</label>
-            <select style={{ ...styles.input, maxWidth: 220 }} value={positionFilter} onChange={(e) => setPositionFilter(e.target.value)}>
-              <option value="">All positions</option>
-              {positions.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
+        {bookingsLoading && <p className="message">Loading guest counts…</p>}
+        {bookingsError && <p style={{ color: colors.danger }}>{bookingsError}</p>}
+        {!bookingsLoading && ratioPositions.length === 0 && (
+          <p className="message">Add at least one staffing ratio above to see coverage flags.</p>
+        )}
+        {!bookingsLoading && ratioPositions.length > 0 && (
+          <div style={styles.tableWrap}>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>Position</th>
+                  {weeks.map((w) => (
+                    <th style={styles.th} key={fmtDateOnly(w.start)}>
+                      {w.start.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' })}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {ratioPositions.map((position) => (
+                  <tr key={position}>
+                    <td style={styles.td}>{position}</td>
+                    {weeks.map((w) => renderCoverageDayStrip(position, w))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-          <div>
-            <label style={styles.label}>Week starts on</label>
-            <select
-              style={{ ...styles.input, maxWidth: 160 }}
-              value={weekStartDay}
-              onChange={(e) => onWeekStartDayChange(Number(e.target.value))}
-            >
-              {WEEKDAY_NAMES.map((name, idx) => (
-                <option key={idx} value={idx}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div style={{ fontSize: 11, color: colors.muted, marginTop: 6 }}>
-          Align this to the day your rotation blocks actually start (e.g. Friday) so the weekly
-          headcount below reflects real on/off blocks instead of always showing everyone as
-          available.
-        </div>
+        )}
       </div>
 
       <div style={styles.card}>
@@ -1727,11 +1764,116 @@ function ScheduleTab({
         </div>
       </div>
 
-      <div style={styles.card}>
-        <div style={styles.cardTitle}>Staffing ratios</div>
+      <CollapsibleCard title="Allocate lodge">
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Who's working where — pick a lodge for any working week (below, under Weekly schedule) and
+          it shows here grouped by position.
+        </div>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Employee</th>
+                {weeks.map((w) => (
+                  <th style={styles.th} key={fmtDateOnly(w.start)}>
+                    {w.start.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' })}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {groupedEmployees.map((group) => (
+                <Fragment key={group.position}>
+                  <tr>
+                    <td
+                      style={{ ...styles.td, fontWeight: 700, color: colors.goldLt, background: 'rgba(184,147,90,0.08)' }}
+                      colSpan={WEEKS_SHOWN + 1}
+                    >
+                      {group.position} ({group.list.length})
+                    </td>
+                  </tr>
+                  {group.list.map((e) => (
+                    <tr key={e.id}>
+                      <td style={styles.td}>
+                        {e.first_name} {e.last_name}
+                      </td>
+                      {weeks.map((w) => renderDayStrip(e, w))}
+                    </tr>
+                  ))}
+                </Fragment>
+              ))}
+              {groupedEmployees.length === 0 && (
+                <tr>
+                  <td style={styles.td} colSpan={WEEKS_SHOWN + 1}>
+                    No employees yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </CollapsibleCard>
+
+      <CollapsibleCard
+        title="Weekly schedule"
+        headerExtra={
+          <div style={{ ...styles.row, gap: 6 }}>
+            <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, -WEEKS_SHOWN * 7))}>
+              ← Earlier
+            </button>
+            <button style={styles.buttonGhost} onClick={() => setWeekStart(startOfWeek(today, weekStartDay))}>
+              Today
+            </button>
+            <button style={styles.buttonGhost} onClick={() => setWeekStart((w) => addDays(w, WEEKS_SHOWN * 7))}>
+              Later →
+            </button>
+          </div>
+        }
+      >
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Each strip is one week, {WEEKDAY_NAMES[weekStartDay]} → {WEEKDAY_NAMES[(weekStartDay + 6) % 7]}, one
+          square per day. Green = working, grey = off, gold = on leave. Pick a lodge for any working
+          week and it applies to that whole week — it can be changed week to week within the same
+          rotation.
+        </div>
+        <div style={{ ...styles.row, alignItems: 'flex-end' }}>
+          <div>
+            <label style={styles.label}>Filter by position</label>
+            <select style={{ ...styles.input, maxWidth: 220 }} value={positionFilter} onChange={(e) => setPositionFilter(e.target.value)}>
+              <option value="">All positions</option>
+              {positions.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={styles.label}>Week starts on</label>
+            <select
+              style={{ ...styles.input, maxWidth: 160 }}
+              value={weekStartDay}
+              onChange={(e) => onWeekStartDayChange(Number(e.target.value))}
+            >
+              {WEEKDAY_NAMES.map((name, idx) => (
+                <option key={idx} value={idx}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: colors.muted, marginTop: 6 }}>
+          Align this to the day your rotation blocks actually start (e.g. Friday) so the weekly
+          headcount below reflects real on/off blocks instead of always showing everyone as
+          available.
+        </div>
+      </CollapsibleCard>
+
+      <CollapsibleCard title="Staffing ratios">
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
           Define how many of each position you need for a given number of guests (e.g. 1 Ranger for
-          1-9 guests, 2 for 10-20). The Staffing coverage card below flags any day that falls short,
+          1-9 guests, 2 for 10-20). The Staffing coverage card above flags any day that falls short,
           per lodge.
         </div>
         <div style={styles.formGrid}>
@@ -1827,104 +1969,9 @@ function ScheduleTab({
             </table>
           </div>
         )}
-      </div>
+      </CollapsibleCard>
 
-      <div style={styles.card}>
-        <div style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap' }}>
-          <div style={styles.cardTitle}>Staffing coverage</div>
-          <select style={{ ...styles.smallInput, width: 90 }} value={coverageLodge} onChange={(e) => setCoverageLodge(e.target.value)}>
-            {LOCATIONS.map((l) => (
-              <option key={l.id} value={l.id}>
-                {l.id}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-          Per day, per position: guest counts come from imported revenue bookings (Confirmed/Checked
-          Out, split evenly across each stay's nights), staff counts come from who's on and assigned
-          to {coverageLodge || 'this lodge'} that week above. Red = short-staffed that night, green =
-          covered, dashed = no guests that night or no ratio configured for that position.
-        </div>
-        {bookingsLoading && <p className="message">Loading guest counts…</p>}
-        {bookingsError && <p style={{ color: colors.danger }}>{bookingsError}</p>}
-        {!bookingsLoading && ratioPositions.length === 0 && (
-          <p className="message">Add at least one staffing ratio above to see coverage flags.</p>
-        )}
-        {!bookingsLoading && ratioPositions.length > 0 && (
-          <div style={styles.tableWrap}>
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>Position</th>
-                  {weeks.map((w) => (
-                    <th style={styles.th} key={fmtDateOnly(w.start)}>
-                      {w.start.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' })}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {ratioPositions.map((position) => (
-                  <tr key={position}>
-                    <td style={styles.td}>{position}</td>
-                    {weeks.map((w) => renderCoverageDayStrip(position, w))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      <div style={styles.card}>
-        <div style={styles.tableWrap}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Employee</th>
-                {weeks.map((w) => (
-                  <th style={styles.th} key={fmtDateOnly(w.start)}>
-                    {w.start.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' })}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {groupedEmployees.map((group) => (
-                <Fragment key={group.position}>
-                  <tr>
-                    <td
-                      style={{ ...styles.td, fontWeight: 700, color: colors.goldLt, background: 'rgba(184,147,90,0.08)' }}
-                      colSpan={WEEKS_SHOWN + 1}
-                    >
-                      {group.position} ({group.list.length})
-                    </td>
-                  </tr>
-                  {group.list.map((e) => (
-                    <tr key={e.id}>
-                      <td style={styles.td}>
-                        {e.first_name} {e.last_name}
-                      </td>
-                      {weeks.map((w) => renderDayStrip(e, w))}
-                    </tr>
-                  ))}
-                </Fragment>
-              ))}
-              {groupedEmployees.length === 0 && (
-                <tr>
-                  <td style={styles.td} colSpan={WEEKS_SHOWN + 1}>
-                    No employees yet.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div style={styles.card}>
-        <div style={styles.cardTitle}>Cycles</div>
+      <CollapsibleCard title="Cycles">
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
           Set any date that fell on day 1 of an employee's 21-day working block — on/off is
           calculated forward (and backward) from there in 28-day steps, so it doesn't have to be a
@@ -1974,7 +2021,7 @@ function ScheduleTab({
             </tbody>
           </table>
         </div>
-      </div>
+      </CollapsibleCard>
     </>
   )
 }
