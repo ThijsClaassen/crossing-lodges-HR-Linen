@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import { sb, LOCATIONS, UNIFORM_CATEGORIES, LINEN_CATEGORIES, MOVEMENT_REASONS, CONTRACT_TYPES } from './sb.js'
 import { getRealStaffCostOverview } from './staffCostEngine.js'
 import { guestsByLodgeAndDate, requiredCountFor } from './staffingCoverageEngine.js'
-import { colors, fonts } from './theme.js'
+import { colors, fonts, css } from './theme.js'
 import { supabase } from './supabaseClient.js'
 import Login from './Login.jsx'
 import SetPassword from './SetPassword.jsx'
@@ -825,33 +825,62 @@ function AuthenticatedApp() {
   const activeTab = TABS.some((t) => t.id === tab) ? tab : TABS[0].id
 
   return (
-    <div style={styles.app}>
-      <style>{`
-        .desktop-tab-row { display: flex; }
-        .mobile-nav-bar { display: none; }
-        @media (max-width: 768px) {
-          .desktop-tab-row { display: none; }
-          .mobile-nav-bar { display: flex; }
-        }
-      `}</style>
-      <div style={styles.header}>
-        <div style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap' }}>
-          <div style={{ ...styles.headerTitle, minWidth: 0, flexShrink: 1 }}>
-            <img
-              src="/logo.png"
-              alt=""
-              style={{ ...styles.logo, flexShrink: 0 }}
-              onError={(e) => (e.target.style.display = 'none')}
-            />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{companyName} — HR & Housekeeping</span>
+    <div className="shell">
+      <style>{css}</style>
+
+      {/* ── DESKTOP SIDEBAR — same shell/sidebar/nav pattern as Ops/Maintenance,
+          tabs listed top-to-bottom on the left (2026-08-17). Hidden <=768px;
+          the topbar + bottom-nav sheet below cover mobile. */}
+      <div className="sidebar">
+        <div className="sidebar-logo">
+          <img src="/logo.png" alt="" onError={(e) => (e.target.style.display = 'none')} />
+          <div className="sidebar-sub">HR &amp; Housekeeping</div>
+          <div className="sidebar-company">{companyName}</div>
+        </div>
+
+        {availableCompanies.length > 1 && (
+          <div className="sidebar-select-wrap">
+            <select className="sidebar-select" value={companyId} onChange={(e) => switchCompany(e.target.value)}>
+              {availableCompanies.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
           </div>
-          <div style={{ ...styles.row, flexShrink: 0 }}>
+        )}
+
+        <nav className="nav">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              className={`nav-item${activeTab === t.id ? ' active' : ''}`}
+              onClick={() => setTab(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="sidebar-footer">
+          <span style={styles.badge('neutral')}>{ROLE_LABELS[role]}</span>
+          <div className="sidebar-footer-row">
+            <button className="sidebar-footer-btn" onClick={loadAll}>
+              Refresh
+            </button>
+            <button className="sidebar-footer-btn" onClick={logout}>
+              Sign out
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="main">
+        <div className="topbar">
+          <div className="page-title">{companyName} — {TABS.find((t) => t.id === activeTab)?.label}</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             {availableCompanies.length > 1 && (
-              <select
-                value={companyId}
-                onChange={(e) => switchCompany(e.target.value)}
-                style={{ ...styles.smallInput, width: 'auto' }}
-              >
+              <select className="topbar-select" value={companyId} onChange={(e) => switchCompany(e.target.value)}>
                 {availableCompanies.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}
@@ -860,26 +889,13 @@ function AuthenticatedApp() {
               </select>
             )}
             <span style={styles.badge('neutral')}>{ROLE_LABELS[role]}</span>
-            <button style={{ ...styles.pill(false), padding: '4px 10px' }} onClick={logout}>
+            <button className="topbar-signout" onClick={logout}>
               Log out
             </button>
           </div>
         </div>
-      </div>
 
-      <nav className="desktop-tab-row" style={styles.desktopTabRow}>
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            style={styles.desktopTab(activeTab === t.id)}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </nav>
-
-      <div style={styles.content}>
+        <div style={styles.content}>
         {error && (
           <div
             style={{
@@ -1023,53 +1039,54 @@ function AuthenticatedApp() {
         )}
       </div>
 
-      <div className="mobile-nav-bar" style={styles.navBar}>
-        <button style={styles.navMenuButton} onClick={() => setMenuOpen(true)}>
-          <span>☰</span>
-          <span>{TABS.find((t) => t.id === activeTab)?.label || 'Menu'}</span>
-        </button>
-      </div>
-
-      {menuOpen && (
-        <div className="mobile-nav-bar" style={{ ...styles.navOverlay, display: undefined }} onClick={() => setMenuOpen(false)}>
-          <div style={styles.navSheet} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.navSheetHeader}>
-              <span style={styles.navSheetTitle}>Menu</span>
-              <button style={styles.navSheetClose} onClick={() => setMenuOpen(false)}>
-                Close
-              </button>
-            </div>
-            {TABS.map((t) => (
-              <button
-                key={t.id}
-                style={styles.navSheetItem(activeTab === t.id)}
-                onClick={() => {
-                  setTab(t.id)
-                  setMenuOpen(false)
-                }}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
+        <div className="bottom-nav">
+          <button style={styles.navMenuButton} onClick={() => setMenuOpen(true)}>
+            <span>☰</span>
+            <span>{TABS.find((t) => t.id === activeTab)?.label || 'Menu'}</span>
+          </button>
         </div>
-      )}
 
-      {uniformEmployeeId && employeeById[uniformEmployeeId] && (
-        <EmployeeUniformModal
-          role={role}
-          companyId={companyId}
-          employee={employeeById[uniformEmployeeId]}
-          items={uniformItems}
-          stockByItem={uniformStockByItem}
-          issues={uniformIssues}
-          onClose={() => setUniformEmployeeId(null)}
-          onStockChange={upsertLocalUniformStock}
-          onIssuesAdd={addLocalUniformIssues}
-          onIssuesUpdate={updateLocalUniformIssues}
-          onIssuesRemove={removeLocalUniformIssue}
-        />
-      )}
+        {menuOpen && (
+          <div style={styles.navOverlay} onClick={() => setMenuOpen(false)}>
+            <div style={styles.navSheet} onClick={(e) => e.stopPropagation()}>
+              <div style={styles.navSheetHeader}>
+                <span style={styles.navSheetTitle}>Menu</span>
+                <button style={styles.navSheetClose} onClick={() => setMenuOpen(false)}>
+                  Close
+                </button>
+              </div>
+              {TABS.map((t) => (
+                <button
+                  key={t.id}
+                  style={styles.navSheetItem(activeTab === t.id)}
+                  onClick={() => {
+                    setTab(t.id)
+                    setMenuOpen(false)
+                  }}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {uniformEmployeeId && employeeById[uniformEmployeeId] && (
+          <EmployeeUniformModal
+            role={role}
+            companyId={companyId}
+            employee={employeeById[uniformEmployeeId]}
+            items={uniformItems}
+            stockByItem={uniformStockByItem}
+            issues={uniformIssues}
+            onClose={() => setUniformEmployeeId(null)}
+            onStockChange={upsertLocalUniformStock}
+            onIssuesAdd={addLocalUniformIssues}
+            onIssuesUpdate={updateLocalUniformIssues}
+            onIssuesRemove={removeLocalUniformIssue}
+          />
+        )}
+      </div>
     </div>
   )
 }
