@@ -422,7 +422,12 @@ const ADMIN_TABS = [
   { id: 'suppliers', label: 'Suppliers' },
   { id: 'orders', label: 'Orders' },
 ]
-const HRADMIN_TABS = [...ADMIN_TABS, { id: 'contracts', label: 'Contracts' }, { id: 'staffcost', label: 'Staff Cost' }]
+const HRADMIN_TABS = [
+  ...ADMIN_TABS,
+  { id: 'contracts', label: 'Contracts' },
+  { id: 'staffcost', label: 'Staff Cost' },
+  { id: 'loans', label: 'Staff Loans' },
+]
 
 function tabsForRole(role) {
   if (role === 'hradmin') return HRADMIN_TABS
@@ -555,6 +560,10 @@ function AuthenticatedApp() {
   const [linenStock, setLinenStock] = useState([])
   const [linenMovements, setLinenMovements] = useState([])
   const [contracts, setContracts] = useState([])
+  // Staff loans (2026-08-17) — HR-Admin-only reference log, same visibility
+  // as Contracts. No deduction automation: just a place for Thijs to record
+  // an amount + a monthly deduction figure and see it later.
+  const [loans, setLoans] = useState([])
   const [scheduleLocations, setScheduleLocations] = useState([])
   const [leave, setLeave] = useState([])
   // Which day the Schedule tab's display weeks start on (0=Sun..6=Sat).
@@ -580,13 +589,34 @@ function AuthenticatedApp() {
         sb.select('hr_settings', { company_id: companyId }, {}),
         sb.select('hr_staffing_ratios', { company_id: companyId }, { order: 'position.asc,min_guests.asc' }),
       ]
-      // Contracts hold salary/medical aid/pension — only ever fetched for the
-      // HR Admin role, so that data never transits to a Staff/Admin session.
+      // Contracts (and now Loans, same reasoning) hold sensitive pay-related
+      // data — only ever fetched for the HR Admin role, so it never transits
+      // to a Staff/Admin session.
       const results = await Promise.all(
-        role === 'hradmin' ? [...base, sb.select('hr_contracts', { company_id: companyId }, {})] : base
+        role === 'hradmin'
+          ? [
+              ...base,
+              sb.select('hr_contracts', { company_id: companyId }, {}),
+              sb.select('hr_staff_loans', { company_id: companyId }, { order: 'loan_date.desc' }),
+            ]
+          : base
       )
-      const [empRes, supRes, uItemsRes, uStockRes, uIssuesRes, lItemsRes, lStockRes, lMoveRes, schedLocRes, leaveRes, settingsRes, ratiosRes, conRes] =
-        results
+      const [
+        empRes,
+        supRes,
+        uItemsRes,
+        uStockRes,
+        uIssuesRes,
+        lItemsRes,
+        lStockRes,
+        lMoveRes,
+        schedLocRes,
+        leaveRes,
+        settingsRes,
+        ratiosRes,
+        conRes,
+        loanRes,
+      ] = results
 
       setEmployees(empRes || [])
       setSuppliers(supRes || [])
@@ -603,6 +633,7 @@ function AuthenticatedApp() {
       setWeekStartDay(settingsRes?.[0]?.week_start_day ?? 1)
       setStaffingRatios(ratiosRes || [])
       setContracts(conRes || [])
+      setLoans(loanRes || [])
     } catch (e) {
       setError(e.message)
     } finally {
@@ -694,6 +725,16 @@ function AuthenticatedApp() {
   }
   function updateLocalContract(row) {
     setContracts((prev) => prev.map((c) => (c.id === row.id ? row : c)))
+  }
+
+  function addLocalLoan(row) {
+    setLoans((prev) => [row, ...prev])
+  }
+  function updateLocalLoan(row) {
+    setLoans((prev) => prev.map((l) => (l.id === row.id ? row : l)))
+  }
+  function removeLocalLoan(id) {
+    setLoans((prev) => prev.filter((l) => l.id !== id))
   }
 
   function upsertLocalScheduleLocation(row) {
@@ -967,6 +1008,16 @@ function AuthenticatedApp() {
             )}
             {activeTab === 'staffcost' && role === 'hradmin' && (
               <StaffCostTab companyId={companyId} employees={employees} contracts={contracts} scheduleLocations={scheduleLocations} />
+            )}
+            {activeTab === 'loans' && role === 'hradmin' && (
+              <LoansTab
+                companyId={companyId}
+                employees={employees}
+                loans={loans}
+                onAdd={addLocalLoan}
+                onUpdate={updateLocalLoan}
+                onRemove={removeLocalLoan}
+              />
             )}
           </>
         )}
@@ -1414,12 +1465,23 @@ function ScheduleTab({
   // containing `date` (via the lodge picker on the day-strips above) — an
   // employee with no lodge picked that week doesn't count toward any
   // lodge's coverage, since we genuinely don't know where they are.
-  function actualCountFor(position, lodge, date) {
+  //
+  // `storageKey` must be passed in as mondayKeyOf(w.start) — the display
+  // week's own start — NOT recomputed from `date` here. When weekStartDay
+  // isn't Monday, a display week's later days (e.g. the Mon/Tue tail of a
+  // Wed-start week) fall in a *different* calendar-Monday bucket than the
+  // week's own start date. Recomputing mondayKeyOf(date) per day used to
+  // look up a storage key that saveWeekLocation never wrote to (it always
+  // writes under mondayKeyOf(w.start)), so those tail days silently saw no
+  // lodge assignment and got flagged "short" even with staff allocated —
+  // the bug Thijs reported on 2026-08-17. Always derive storageKey once
+  // per week from w.start, same as renderDayStrip does when saving.
+  function actualCountFor(position, lodge, date, storageKey) {
     let count = 0
     for (const e of employees) {
       if (positionOf(e) !== position) continue
       if (dayInfo(e, date).status !== 'on') continue
-      const loc = locationByKey[`${e.id}|${mondayKeyOf(date)}`]
+      const loc = locationByKey[`${e.id}|${storageKey}`]
       if (loc?.location_id === lodge) count++
     }
     return count
@@ -1445,11 +1507,15 @@ function ScheduleTab({
   }
 
   function renderCoverageDayStrip(position, w) {
+    // Computed once per displayed week (not per day) — must match the
+    // storage key saveWeekLocation actually wrote under, see the comment
+    // on actualCountFor above.
+    const storageKey = mondayKeyOf(w.start)
     const cells = w.days.map((d) => {
       const dateKey = fmtDateOnly(d)
       const guests = guestsMap[`${coverageLodge}|${dateKey}`] || 0
       const required = requiredCountFor(staffingRatios, position, guests)
-      const actual = actualCountFor(position, coverageLodge, d)
+      const actual = actualCountFor(position, coverageLodge, d, storageKey)
       const short = required !== null && actual < required
       const color = required === null || guests <= 0 ? 'transparent' : short ? colors.danger : colors.ok
       const title =
@@ -1940,6 +2006,27 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
     [leave, selectedYear]
   )
 
+  // Same entries, grouped by employee so each person's periods sit together
+  // instead of interleaved by date across the whole team.
+  const entriesByEmployee = useMemo(() => {
+    const groups = {}
+    for (const l of yearEntries) {
+      if (!groups[l.employee_id]) groups[l.employee_id] = []
+      groups[l.employee_id].push(l)
+    }
+    return Object.entries(groups)
+      .map(([employeeId, entries]) => {
+        const e = employeeById[employeeId]
+        return {
+          employeeId,
+          name: e ? `${e.first_name} ${e.last_name}` : 'Unknown employee',
+          entries,
+          totalDays: entries.reduce((s, l) => s + Number(l.days_used || 0), 0),
+        }
+      })
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [yearEntries, employeeById])
+
   async function saveAllocation(employeeId, value) {
     const [row] = await sb.update('hr_employees', { id: employeeId }, { annual_leave_days: Number(value) || 0 })
     onUpdateEmployee(row)
@@ -1968,11 +2055,6 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
     await sb.remove('hr_leave', { id })
     onLeaveRemove(id)
     setConfirmDeleteId(null)
-  }
-
-  const itemEmployeeName = (id) => {
-    const e = employeeById[id]
-    return e ? `${e.first_name} ${e.last_name}` : 'Unknown employee'
   }
 
   return (
@@ -2091,54 +2173,62 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
 
       <div style={styles.card}>
         <div style={styles.cardTitle}>Logged leave — {selectedYear}</div>
-        <div style={styles.tableWrap}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Employee</th>
-                <th style={styles.th}>From</th>
-                <th style={styles.th}>To</th>
-                <th style={styles.th}>Days used</th>
-                <th style={styles.th}>Note</th>
-                <th style={styles.th}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {yearEntries.map((l) => (
-                <tr key={l.id}>
-                  <td style={styles.td}>{itemEmployeeName(l.employee_id)}</td>
-                  <td style={styles.td}>{l.start_date}</td>
-                  <td style={styles.td}>{l.end_date}</td>
-                  <td style={styles.tdNum}>{fmt(l.days_used, 0)}</td>
-                  <td style={styles.td}>{l.note || '—'}</td>
-                  <td style={styles.td}>
-                    {confirmDeleteId === l.id ? (
-                      <div style={{ ...styles.row, gap: 4 }}>
-                        <button style={styles.buttonDanger} onClick={() => deleteLeave(l.id)}>
-                          Confirm delete?
-                        </button>
-                        <button style={styles.buttonGhost} onClick={() => setConfirmDeleteId(null)}>
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <button style={styles.buttonGhost} onClick={() => setConfirmDeleteId(l.id)}>
-                        Delete
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-              {yearEntries.length === 0 && (
-                <tr>
-                  <td style={styles.td} colSpan={6}>
-                    No leave logged for {selectedYear} yet.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Grouped by employee, each person's periods listed together.
         </div>
+        {entriesByEmployee.map((group) => (
+          <div key={group.employeeId} style={{ marginBottom: 18 }}>
+            <div style={{ ...styles.row, justifyContent: 'space-between', marginBottom: 6 }}>
+              <strong style={{ color: colors.cream }}>{group.name}</strong>
+              <span style={{ fontSize: 12, color: colors.muted }}>
+                {fmt(group.totalDays, 0)} day{group.totalDays === 1 ? '' : 's'} · {group.entries.length} period
+                {group.entries.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            <div style={styles.tableWrap}>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>From</th>
+                    <th style={styles.th}>To</th>
+                    <th style={styles.th}>Days used</th>
+                    <th style={styles.th}>Note</th>
+                    <th style={styles.th}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {group.entries.map((l) => (
+                    <tr key={l.id}>
+                      <td style={styles.td}>{l.start_date}</td>
+                      <td style={styles.td}>{l.end_date}</td>
+                      <td style={styles.tdNum}>{fmt(l.days_used, 0)}</td>
+                      <td style={styles.td}>{l.note || '—'}</td>
+                      <td style={styles.td}>
+                        {confirmDeleteId === l.id ? (
+                          <div style={{ ...styles.row, gap: 4 }}>
+                            <button style={styles.buttonDanger} onClick={() => deleteLeave(l.id)}>
+                              Confirm delete?
+                            </button>
+                            <button style={styles.buttonGhost} onClick={() => setConfirmDeleteId(null)}>
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button style={styles.buttonGhost} onClick={() => setConfirmDeleteId(l.id)}>
+                            Delete
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ))}
+        {entriesByEmployee.length === 0 && (
+          <div style={{ fontSize: 13, color: colors.muted }}>No leave logged for {selectedYear} yet.</div>
+        )}
       </div>
     </>
   )
@@ -3828,6 +3918,181 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
             </div>
           </>
         )}
+      </div>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Staff Loans tab — HR Admin only, same visibility as Contracts (2026-08-17).
+// Deliberately simple: a reference log of what was loaned and what the
+// agreed monthly deduction is, for Thijs to check against — no payroll
+// integration, no automatic balance tracking. "Remaining balance" shown is
+// a plain estimate (amount minus deduction x whole months elapsed since the
+// loan date, floored at 0) purely as a rough at-a-glance figure; it isn't
+// written anywhere and isn't authoritative — if it and Thijs's own records
+// disagree, his records win.
+// ---------------------------------------------------------------------------
+
+function monthsSince(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00`)
+  const now = new Date()
+  if (now <= d) return 0
+  let months = (now.getFullYear() - d.getFullYear()) * 12 + (now.getMonth() - d.getMonth())
+  if (now.getDate() < d.getDate()) months -= 1
+  return Math.max(0, months)
+}
+
+function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
+  const [form, setForm] = useState({
+    employee_id: '',
+    loan_date: todayStr(),
+    amount: '',
+    monthly_deduction: '',
+    notes: '',
+  })
+  const [saving, setSaving] = useState(false)
+
+  async function addLoan() {
+    if (!form.employee_id || !form.amount) return
+    setSaving(true)
+    const [row] = await sb.insert('hr_staff_loans', {
+      company_id: companyId,
+      employee_id: form.employee_id,
+      loan_date: form.loan_date,
+      amount: Number(form.amount),
+      monthly_deduction: form.monthly_deduction === '' ? 0 : Number(form.monthly_deduction),
+      notes: form.notes || null,
+    })
+    setForm({ employee_id: '', loan_date: todayStr(), amount: '', monthly_deduction: '', notes: '' })
+    setSaving(false)
+    onAdd(row)
+  }
+
+  async function removeLoan(id) {
+    await sb.remove('hr_staff_loans', { id })
+    onRemove(id)
+  }
+
+  const empName = (id) => {
+    const e = employees.find((x) => x.id === id)
+    return e ? `${e.first_name} ${e.last_name}` : 'Unknown'
+  }
+
+  const sortedLoans = useMemo(
+    () => [...loans].sort((a, b) => (a.loan_date < b.loan_date ? 1 : -1)),
+    [loans]
+  )
+
+  return (
+    <>
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Log a staff loan</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Reference only — nothing here feeds payroll or deducts anything automatically. Just a place to
+          keep track of what's owed and the agreed monthly deduction. HR Admin only, same as Contracts.
+        </div>
+        <div style={styles.formGrid}>
+          <div>
+            <label style={styles.label}>Employee</label>
+            <select
+              style={styles.input}
+              value={form.employee_id}
+              onChange={(e) => setForm({ ...form, employee_id: e.target.value })}
+            >
+              <option value="">Choose employee…</option>
+              {employees.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.first_name} {e.last_name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={styles.label}>Loan date</label>
+            <input
+              type="date"
+              style={styles.input}
+              value={form.loan_date}
+              onChange={(e) => setForm({ ...form, loan_date: e.target.value })}
+            />
+          </div>
+          <div>
+            <label style={styles.label}>Amount</label>
+            <input
+              type="number"
+              style={styles.input}
+              value={form.amount}
+              onChange={(e) => setForm({ ...form, amount: e.target.value })}
+            />
+          </div>
+          <div>
+            <label style={styles.label}>Monthly deduction</label>
+            <input
+              type="number"
+              style={styles.input}
+              value={form.monthly_deduction}
+              onChange={(e) => setForm({ ...form, monthly_deduction: e.target.value })}
+            />
+          </div>
+          <div>
+            <label style={styles.label}>Notes (optional)</label>
+            <input style={styles.input} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+          </div>
+        </div>
+        <button style={styles.button} onClick={addLoan} disabled={saving}>
+          {saving ? 'Saving…' : 'Add loan'}
+        </button>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>{sortedLoans.length} staff loan{sortedLoans.length === 1 ? '' : 's'}</div>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Employee</th>
+                <th style={styles.th}>Loan date</th>
+                <th style={styles.th}>Amount</th>
+                <th style={styles.th}>Monthly deduction</th>
+                <th style={styles.th}>Est. remaining</th>
+                <th style={styles.th}>Notes</th>
+                <th style={styles.th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedLoans.map((l) => {
+                const months = monthsSince(l.loan_date)
+                const estRemaining =
+                  l.monthly_deduction > 0
+                    ? Math.max(0, Number(l.amount) - Number(l.monthly_deduction) * months)
+                    : Number(l.amount)
+                return (
+                  <tr key={l.id}>
+                    <td style={styles.td}>{empName(l.employee_id)}</td>
+                    <td style={styles.td}>{l.loan_date}</td>
+                    <td style={styles.tdNum}>R {fmt(l.amount)}</td>
+                    <td style={styles.tdNum}>{l.monthly_deduction ? `R ${fmt(l.monthly_deduction)}` : '—'}</td>
+                    <td style={styles.tdNum}>R {fmt(estRemaining)}</td>
+                    <td style={styles.td}>{l.notes || '—'}</td>
+                    <td style={styles.td}>
+                      <button style={styles.buttonDanger} onClick={() => removeLoan(l.id)}>
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+              {sortedLoans.length === 0 && (
+                <tr>
+                  <td style={styles.td} colSpan={7}>
+                    No loans logged yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </>
   )
