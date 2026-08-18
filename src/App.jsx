@@ -4114,14 +4114,25 @@ function firstOfMonth(d) {
 }
 
 // Simulates one pooled balance for all of an employee's stacked loan
-// amounts: walk month by month from the earliest loan's month to the
-// current month, adding any amounts dated in that month, then subtracting
-// one month's deduction (skipped for the very first month, since the loan
-// was only taken partway through it) — floored at 0.
+// amounts AND any additional/extra payments they've made (2026-08-19):
+// walk month by month from the earliest row's month to the current month,
+// adding whatever's dated in that month (a loan row is a positive amount, an
+// extra payment row is stored as a NEGATIVE amount so it just falls out of
+// the same running total), then subtracting one month's regular deduction
+// (skipped for the very first month, since the loan was only taken partway
+// through it) — floored at 0. Extra payments pay down the balance on top of
+// whatever the regular monthly deduction already covers that month.
 function simulateLoanCenter(empLoans) {
   const sorted = [...empLoans].sort((a, b) => (a.loan_date < b.loan_date ? -1 : a.loan_date > b.loan_date ? 1 : 0))
-  const totalBorrowed = sorted.reduce((s, l) => s + Number(l.amount || 0), 0)
-  const deduction = Number(sorted[sorted.length - 1]?.monthly_deduction || 0)
+  const loanRows = sorted.filter((l) => Number(l.amount || 0) > 0)
+  const paymentRows = sorted.filter((l) => Number(l.amount || 0) < 0)
+  const totalBorrowed = loanRows.reduce((s, l) => s + Number(l.amount || 0), 0)
+  const totalExtraPayments = paymentRows.reduce((s, l) => s + Math.abs(Number(l.amount || 0)), 0)
+  // Deduction rate always comes from the latest LOAN row, never a payment
+  // row — otherwise logging an extra payment (which has no deduction of its
+  // own) could look like the rate got reset to 0 if it happened to be the
+  // most recently dated row.
+  const deduction = Number(loanRows[loanRows.length - 1]?.monthly_deduction || 0)
 
   let balance = 0
   let li = 0
@@ -4134,12 +4145,13 @@ function simulateLoanCenter(empLoans) {
       li++
     }
     if (!firstMonth && deduction > 0) balance = Math.max(0, balance - deduction)
+    balance = Math.max(0, balance)
     firstMonth = false
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
   }
 
   const monthsToPayOff = deduction > 0 && balance > 0 ? Math.ceil(balance / deduction) : deduction > 0 ? 0 : null
-  return { loans: sorted, totalBorrowed, deduction, balance, monthsToPayOff }
+  return { loans: sorted, totalBorrowed, totalExtraPayments, deduction, balance, monthsToPayOff }
 }
 
 function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
@@ -4147,6 +4159,10 @@ function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
   const [saving, setSaving] = useState(false)
   const [deductionEdits, setDeductionEdits] = useState({}) // employee_id -> in-progress edit value
   const [savingDeductionFor, setSavingDeductionFor] = useState(null)
+  // Additional/extra payment popup (2026-08-19) — Thijs: staff sometimes pay
+  // extra to clear a loan faster, on top of the regular monthly deduction.
+  // Holds the employee_id the popup is currently open for, or null.
+  const [paymentPopupFor, setPaymentPopupFor] = useState(null)
 
   const empName = (id) => {
     const e = employees.find((x) => x.id === id)
@@ -4203,6 +4219,27 @@ function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
   async function removeLoan(id) {
     await sb.remove('hr_staff_loans', { id })
     onRemove(id)
+  }
+
+  // Logs an extra/additional payment on top of the regular monthly
+  // deduction (2026-08-19) — e.g. a staff member hands over a lump sum to
+  // clear their loan faster. Stored as just another hr_staff_loans row for
+  // that employee, with the amount NEGATIVE so simulateLoanCenter's running
+  // total simply subtracts it in the month it happened — no schema change,
+  // and it shows up in the same stacked history table, labeled "Payment".
+  async function addPayment(employeeId, { date, amount, notes }) {
+    if (!employeeId || !amount) return
+    const center = centerByEmployeeId[employeeId]
+    const [row] = await sb.insert('hr_staff_loans', {
+      company_id: companyId,
+      employee_id: employeeId,
+      loan_date: date,
+      amount: -Math.abs(Number(amount)),
+      monthly_deduction: center ? center.deduction : 0,
+      notes: notes || 'Additional payment',
+    })
+    onAdd(row)
+    setPaymentPopupFor(null)
   }
 
   async function saveDeduction(employeeId) {
@@ -4328,14 +4365,30 @@ function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
                       )}
                     </div>
                   </div>
+                  <div>
+                    <label style={{ ...styles.label, marginBottom: 2 }}>&nbsp;</label>
+                    <button
+                      style={{ ...styles.buttonGhost, padding: '5px 10px', fontSize: 12 }}
+                      onClick={() => setPaymentPopupFor(c.employee_id)}
+                    >
+                      + Log additional payment
+                    </button>
+                  </div>
                 </div>
               </div>
+
+              {c.totalExtraPayments > 0 && (
+                <div style={{ fontSize: 11, color: colors.ok, marginTop: 6 }}>
+                  R {fmt(c.totalExtraPayments)} in extra payments logged on top of the regular deduction.
+                </div>
+              )}
 
               <div style={{ ...styles.tableWrap, marginTop: 10 }}>
                 <table style={styles.table}>
                   <thead>
                     <tr>
-                      <th style={styles.th}>Loan date</th>
+                      <th style={styles.th}>Date</th>
+                      <th style={styles.th}>Type</th>
                       <th style={styles.th}>Amount</th>
                       <th style={styles.th}>Notes</th>
                       <th style={styles.th}></th>
@@ -4345,18 +4398,26 @@ function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
                     {c.loans
                       .slice()
                       .sort((a, b) => (a.loan_date < b.loan_date ? 1 : -1))
-                      .map((l) => (
-                        <tr key={l.id}>
-                          <td style={styles.td}>{l.loan_date}</td>
-                          <td style={styles.tdNum}>R {fmt(l.amount)}</td>
-                          <td style={styles.td}>{l.notes || '—'}</td>
-                          <td style={styles.td}>
-                            <button style={styles.buttonDanger} onClick={() => removeLoan(l.id)}>
-                              Delete
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                      .map((l) => {
+                        const isPayment = Number(l.amount) < 0
+                        return (
+                          <tr key={l.id}>
+                            <td style={styles.td}>{l.loan_date}</td>
+                            <td style={styles.td}>
+                              <span style={{ color: isPayment ? colors.ok : colors.muted }}>{isPayment ? 'Payment' : 'Loan'}</span>
+                            </td>
+                            <td style={{ ...styles.tdNum, color: isPayment ? colors.ok : colors.cream }}>
+                              {isPayment ? '− ' : ''}R {fmt(Math.abs(l.amount))}
+                            </td>
+                            <td style={styles.td}>{l.notes || '—'}</td>
+                            <td style={styles.td}>
+                              <button style={styles.buttonDanger} onClick={() => removeLoan(l.id)}>
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        )
+                      })}
                   </tbody>
                 </table>
               </div>
@@ -4364,7 +4425,82 @@ function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
           )
         })}
       </div>
+
+      {paymentPopupFor && (
+        <AddPaymentModal
+          employeeName={empName(paymentPopupFor)}
+          currentBalance={centerByEmployeeId[paymentPopupFor]?.balance || 0}
+          onClose={() => setPaymentPopupFor(null)}
+          onSave={(data) => addPayment(paymentPopupFor, data)}
+        />
+      )}
     </>
+  )
+}
+
+// Popup for logging an extra/additional payment against an employee's loan
+// balance (2026-08-19) — separate from the main "Log a staff loan" form
+// since this is the opposite direction (money coming IN off the balance,
+// not going out), and Thijs asked for it as its own button + pop-up rather
+// than folded into the add-loan form. Same overlay chrome as
+// ConfirmPopup/EmployeeUniformModal elsewhere in this file.
+function AddPaymentModal({ employeeName, currentBalance, onClose, onSave }) {
+  const [date, setDate] = useState(todayStr())
+  const [amount, setAmount] = useState('')
+  const [notes, setNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  async function handleSave() {
+    if (!amount) return
+    setSaving(true)
+    await onSave({ date, amount: Number(amount), notes })
+    setSaving(false)
+  }
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.6)',
+        zIndex: 60,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+      }}
+      onClick={onClose}
+    >
+      <div style={{ ...styles.card, maxWidth: 360, width: '100%' }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.cardTitle}>Log additional payment — {employeeName}</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          For extra payments on top of the regular monthly deduction — e.g. a lump sum to clear the loan
+          faster. Current balance: R {fmt(currentBalance)}.
+        </div>
+        <div style={styles.formGrid}>
+          <div>
+            <label style={styles.label}>Payment date</label>
+            <input type="date" style={styles.input} value={date} onChange={(e) => setDate(e.target.value)} />
+          </div>
+          <div>
+            <label style={styles.label}>Amount</label>
+            <input type="number" style={styles.input} value={amount} onChange={(e) => setAmount(e.target.value)} />
+          </div>
+          <div>
+            <label style={styles.label}>Notes (optional)</label>
+            <input style={styles.input} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          </div>
+        </div>
+        <div style={{ ...styles.row, gap: 8, marginTop: 8 }}>
+          <button style={styles.button} onClick={handleSave} disabled={saving || !amount}>
+            {saving ? 'Saving…' : 'Log payment'}
+          </button>
+          <button style={styles.buttonGhost} onClick={onClose}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
