@@ -3632,23 +3632,35 @@ function OrdersTab({ uniformItems, uniformStockByItem, linenItems, linenStock, s
 // contract is derived (latest start_date), not a stored flag.
 // ---------------------------------------------------------------------------
 
+const BLANK_CONTRACT_FORM = {
+  contract_type: 'Permanent',
+  start_date: todayStr(),
+  end_date: '',
+  salary: '',
+  medical_aid: false,
+  medical_aid_scheme: '',
+  medical_aid_monthly_cost: '',
+  pension_fund: false,
+  pension_fund_name: '',
+  pension_fund_monthly_cost: '',
+  housing_monthly_cost: '',
+  notes: '',
+}
+
 function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
   const [selectedEmployeeId, setSelectedEmployeeId] = useState('')
-  const [form, setForm] = useState({
-    contract_type: 'Permanent',
-    start_date: todayStr(),
-    end_date: '',
-    salary: '',
-    medical_aid: false,
-    medical_aid_scheme: '',
-    medical_aid_monthly_cost: '',
-    pension_fund: false,
-    pension_fund_name: '',
-    pension_fund_monthly_cost: '',
-    housing_monthly_cost: '',
-    notes: '',
-  })
+  const [form, setForm] = useState(BLANK_CONTRACT_FORM)
   const [saving, setSaving] = useState(false)
+  // Set while amending an EXISTING contract row in place (2026-08-18) — the
+  // Staff Cost tab's fields (medical aid/pension cost etc.) were added
+  // after a lot of employees already had a contract on file, so those rows
+  // are just missing the newer numbers. Re-typing a brand new contract row
+  // for every existing employee would double their contract history and
+  // make it look like everyone got a new contract on the same day, so
+  // "Edit contract" instead updates the same row via sb.update rather than
+  // inserting — see startEditContract/saveContractEdit below. null means
+  // the form below is in its original "add a new contract row" mode.
+  const [editingContractId, setEditingContractId] = useState(null)
 
   const overview = useMemo(
     () =>
@@ -3685,22 +3697,70 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
       housing_monthly_cost: form.housing_monthly_cost === '' ? null : Number(form.housing_monthly_cost),
       notes: form.notes,
     })
-    setForm({
-      contract_type: 'Permanent',
-      start_date: todayStr(),
-      end_date: '',
-      salary: '',
-      medical_aid: false,
-      medical_aid_scheme: '',
-      medical_aid_monthly_cost: '',
-      pension_fund: false,
-      pension_fund_name: '',
-      pension_fund_monthly_cost: '',
-      housing_monthly_cost: '',
-      notes: '',
-    })
+    setForm(BLANK_CONTRACT_FORM)
     setSaving(false)
     onAdd(row)
+  }
+
+  // Amend the employee's EXISTING contract row in place (2026-08-18) instead
+  // of inserting a new one — see the comment on editingContractId above for
+  // why. startEditContract loads the chosen contract's values into the same
+  // form the "add" flow uses; saveContractEdit patches that row via
+  // sb.update rather than sb.insert.
+  function startEditContract(employee, contract) {
+    setSelectedEmployeeId(employee.id)
+    setEditingContractId(contract.id)
+    setForm({
+      contract_type: contract.contract_type || 'Permanent',
+      start_date: contract.start_date || todayStr(),
+      end_date: contract.end_date || '',
+      salary: contract.salary === null || contract.salary === undefined ? '' : String(contract.salary),
+      medical_aid: !!contract.medical_aid,
+      medical_aid_scheme: contract.medical_aid_scheme || '',
+      medical_aid_monthly_cost:
+        contract.medical_aid_monthly_cost === null || contract.medical_aid_monthly_cost === undefined
+          ? ''
+          : String(contract.medical_aid_monthly_cost),
+      pension_fund: !!contract.pension_fund,
+      pension_fund_name: contract.pension_fund_name || '',
+      pension_fund_monthly_cost:
+        contract.pension_fund_monthly_cost === null || contract.pension_fund_monthly_cost === undefined
+          ? ''
+          : String(contract.pension_fund_monthly_cost),
+      housing_monthly_cost:
+        contract.housing_monthly_cost === null || contract.housing_monthly_cost === undefined
+          ? ''
+          : String(contract.housing_monthly_cost),
+      notes: contract.notes || '',
+    })
+  }
+
+  function cancelEditContract() {
+    setEditingContractId(null)
+    setForm(BLANK_CONTRACT_FORM)
+  }
+
+  async function saveContractEdit() {
+    if (!editingContractId) return
+    setSaving(true)
+    const [row] = await sb.update('hr_contracts', { id: editingContractId }, {
+      contract_type: form.contract_type,
+      start_date: form.start_date,
+      end_date: form.end_date || null,
+      salary: form.salary === '' ? null : Number(form.salary),
+      medical_aid: form.medical_aid,
+      medical_aid_scheme: form.medical_aid_scheme || null,
+      medical_aid_monthly_cost: form.medical_aid_monthly_cost === '' ? null : Number(form.medical_aid_monthly_cost),
+      pension_fund: form.pension_fund,
+      pension_fund_name: form.pension_fund_name || null,
+      pension_fund_monthly_cost: form.pension_fund_monthly_cost === '' ? null : Number(form.pension_fund_monthly_cost),
+      housing_monthly_cost: form.housing_monthly_cost === '' ? null : Number(form.housing_monthly_cost),
+      notes: form.notes,
+    })
+    setSaving(false)
+    setEditingContractId(null)
+    setForm(BLANK_CONTRACT_FORM)
+    onUpdate(row)
   }
 
   const empName = (id) => {
@@ -3744,12 +3804,25 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
               return (
                 <tr key={employee.id}>
                   <td style={styles.td}>
-                    <button
-                      style={{ ...styles.buttonGhost, padding: '3px 8px', fontSize: 12 }}
-                      onClick={() => setSelectedEmployeeId(employee.id)}
-                    >
-                      {employee.first_name} {employee.last_name}
-                    </button>
+                    <div style={{ ...styles.row, gap: 6, flexWrap: 'wrap' }}>
+                      <button
+                        style={{ ...styles.buttonGhost, padding: '3px 8px', fontSize: 12 }}
+                        onClick={() => {
+                          setSelectedEmployeeId(employee.id)
+                          cancelEditContract()
+                        }}
+                      >
+                        {employee.first_name} {employee.last_name}
+                      </button>
+                      {contract && (
+                        <button
+                          style={{ ...styles.buttonGhost, padding: '3px 8px', fontSize: 12, color: colors.gold }}
+                          onClick={() => startEditContract(employee, contract)}
+                        >
+                          Edit contract
+                        </button>
+                      )}
+                    </div>
                   </td>
                   <td style={styles.td}>{contract?.contract_type || '—'}</td>
                   <td style={styles.td}>{contract?.start_date || '—'}</td>
@@ -3797,11 +3870,28 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
       </div>
 
       <div style={styles.card}>
-        <div style={styles.cardTitle}>Add / view contract history</div>
+        <div style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <div style={styles.cardTitle}>
+            {editingContractId ? `Editing current contract — ${empName(selectedEmployeeId)}` : 'Add / view contract history'}
+          </div>
+          {editingContractId && (
+            <button style={{ ...styles.buttonGhost, padding: '3px 8px', fontSize: 12 }} onClick={cancelEditContract}>
+              Cancel edit
+            </button>
+          )}
+        </div>
         <div style={styles.formGrid}>
           <div>
             <label style={styles.label}>Employee</label>
-            <select style={styles.input} value={selectedEmployeeId} onChange={(e) => setSelectedEmployeeId(e.target.value)}>
+            <select
+              style={styles.input}
+              value={selectedEmployeeId}
+              onChange={(e) => {
+                setSelectedEmployeeId(e.target.value)
+                cancelEditContract()
+              }}
+              disabled={!!editingContractId}
+            >
               <option value="">Choose employee…</option>
               {employees.map((e) => (
                 <option key={e.id} value={e.id}>
@@ -3930,8 +4020,8 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
                 <input style={styles.input} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
               </div>
             </div>
-            <button style={styles.button} onClick={addContract} disabled={saving}>
-              {saving ? 'Saving…' : 'Add contract record'}
+            <button style={styles.button} onClick={editingContractId ? saveContractEdit : addContract} disabled={saving}>
+              {saving ? 'Saving…' : editingContractId ? 'Save changes' : 'Add contract record'}
             </button>
 
             <div style={{ marginTop: 16 }}>
