@@ -2346,6 +2346,19 @@ function EmployeesTab({ companyId, employees, scheduleLocations, leave, onAdd, o
   const [newPositionText, setNewPositionText] = useState('')
   const [addingPositionForId, setAddingPositionForId] = useState(null)
   const [rowNewPositionText, setRowNewPositionText] = useState('')
+  // Department (2026-08-19) — was a plain free-text <input> with no trim,
+  // which is exactly how the Staff Cost report ended up showing "Maintenance"
+  // and "Management" twice each: someone re-typing a department into the
+  // per-row cell added a trailing space or a stray case change, and since
+  // browsers collapse trailing whitespace when *displaying* a table cell,
+  // the duplicate was invisible in this table even though it grouped
+  // separately everywhere else. Switched to the exact same "pick from
+  // existing (deduped) values, or add a trimmed new one" pattern Position
+  // already used successfully, so this can't recur.
+  const [addingDepartment, setAddingDepartment] = useState(false)
+  const [newDepartmentText, setNewDepartmentText] = useState('')
+  const [addingDepartmentForId, setAddingDepartmentForId] = useState(null)
+  const [rowNewDepartmentText, setRowNewDepartmentText] = useState('')
 
   // Positions aren't a fixed list — just whatever's already in use on real
   // employees, plus whatever's currently picked (so the dropdown never
@@ -2356,6 +2369,13 @@ function EmployeesTab({ companyId, employees, scheduleLocations, leave, onAdd, o
     if (form.position) set.add(form.position)
     return Array.from(set).sort()
   }, [employees, form.position])
+
+  const departmentOptions = useMemo(() => {
+    const set = new Set()
+    for (const e of employees) if (e.department) set.add(e.department)
+    if (form.department) set.add(form.department)
+    return Array.from(set).sort()
+  }, [employees, form.department])
 
   function confirmNewPosition() {
     const v = newPositionText.trim()
@@ -2369,6 +2389,20 @@ function EmployeesTab({ companyId, employees, scheduleLocations, leave, onAdd, o
     if (v) updateEmployee(employeeId, { position: v })
     setAddingPositionForId(null)
     setRowNewPositionText('')
+  }
+
+  function confirmNewDepartment() {
+    const v = newDepartmentText.trim()
+    if (v) setForm((f) => ({ ...f, department: v }))
+    setAddingDepartment(false)
+    setNewDepartmentText('')
+  }
+
+  function confirmRowDepartment(employeeId) {
+    const v = rowNewDepartmentText.trim()
+    if (v) updateEmployee(employeeId, { department: v })
+    setAddingDepartmentForId(null)
+    setRowNewDepartmentText('')
   }
 
   async function addEmployee() {
@@ -2454,7 +2488,52 @@ function EmployeesTab({ companyId, employees, scheduleLocations, leave, onAdd, o
           </div>
           <div>
             <label style={styles.label}>Department</label>
-            <input style={styles.input} value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value })} />
+            {addingDepartment ? (
+              <div style={{ ...styles.row, gap: 4 }}>
+                <input
+                  autoFocus
+                  style={styles.input}
+                  placeholder="New department name"
+                  value={newDepartmentText}
+                  onChange={(e) => setNewDepartmentText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      confirmNewDepartment()
+                    }
+                  }}
+                />
+                <button style={styles.buttonGhost} onClick={confirmNewDepartment}>
+                  Use
+                </button>
+                <button
+                  style={styles.buttonGhost}
+                  onClick={() => {
+                    setAddingDepartment(false)
+                    setNewDepartmentText('')
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <select
+                style={styles.input}
+                value={form.department}
+                onChange={(e) => {
+                  if (e.target.value === '__new__') setAddingDepartment(true)
+                  else setForm({ ...form, department: e.target.value })
+                }}
+              >
+                <option value="">No department set</option>
+                {departmentOptions.map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
+                <option value="__new__">+ Add new department…</option>
+              </select>
+            )}
           </div>
           <div>
             <label style={styles.label}>Start date</label>
@@ -2567,11 +2646,47 @@ function EmployeesTab({ companyId, employees, scheduleLocations, leave, onAdd, o
                   )}
                 </td>
                 <td style={styles.td}>
-                  <input
-                    style={{ ...styles.smallInput, width: 110 }}
-                    defaultValue={e.department || ''}
-                    onBlur={(ev) => updateEmployee(e.id, { department: ev.target.value })}
-                  />
+                  {addingDepartmentForId === e.id ? (
+                    <div style={{ ...styles.row, gap: 4 }}>
+                      <input
+                        autoFocus
+                        style={{ ...styles.smallInput, width: 100 }}
+                        placeholder="New department"
+                        value={rowNewDepartmentText}
+                        onChange={(ev) => setRowNewDepartmentText(ev.target.value)}
+                        onKeyDown={(ev) => {
+                          if (ev.key === 'Enter') {
+                            ev.preventDefault()
+                            confirmRowDepartment(e.id)
+                          }
+                        }}
+                      />
+                      <button style={styles.buttonGhost} onClick={() => confirmRowDepartment(e.id)}>
+                        Use
+                      </button>
+                    </div>
+                  ) : (
+                    <select
+                      style={{ ...styles.smallInput, width: 110 }}
+                      defaultValue={e.department || ''}
+                      onChange={(ev) => {
+                        if (ev.target.value === '__new__') {
+                          setAddingDepartmentForId(e.id)
+                          setRowNewDepartmentText('')
+                        } else {
+                          updateEmployee(e.id, { department: ev.target.value })
+                        }
+                      }}
+                    >
+                      <option value="">No department set</option>
+                      {departmentOptions.map((d) => (
+                        <option key={d} value={d}>
+                          {d}
+                        </option>
+                      ))}
+                      <option value="__new__">+ Add new department…</option>
+                    </select>
+                  )}
                 </td>
                 <td style={styles.td}>{e.start_date || '—'}</td>
                 <td style={styles.td}>
