@@ -1164,9 +1164,18 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
     return { count, value }
   }, [linenMovements, linenItemById, writeOffYear])
 
+  // Only ever look at each employee's CURRENT (latest-start_date) contract —
+  // otherwise a superseded old contract that happened to have a near-term
+  // end_date keeps showing up here forever even after a new contract with a
+  // later/blank end_date was added for that same employee (2026-08-19 fix,
+  // reported by Thijs: "contracts that expired are not going away after
+  // adding a new contract").
   const expiringSoon = useMemo(() => {
     if (role !== 'hradmin') return []
-    return contracts
+    const employeeIds = Array.from(new Set(contracts.map((c) => c.employee_id)))
+    return employeeIds
+      .map((id) => currentContract(id, contracts))
+      .filter(Boolean)
       .map((c) => ({ contract: c, days: daysUntil(c.end_date) }))
       .filter((x) => x.contract.end_date && x.days !== null && x.days <= 60)
       .sort((a, b) => a.days - b.days)
@@ -4078,34 +4087,102 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
 }
 
 // ---------------------------------------------------------------------------
-// Staff Loans tab — HR Admin only, same visibility as Contracts (2026-08-17).
-// Deliberately simple: a reference log of what was loaned and what the
-// agreed monthly deduction is, for Thijs to check against — no payroll
-// integration, no automatic balance tracking. "Remaining balance" shown is
-// a plain estimate (amount minus deduction x whole months elapsed since the
-// loan date, floored at 0) purely as a rough at-a-glance figure; it isn't
-// written anywhere and isn't authoritative — if it and Thijs's own records
-// disagree, his records win.
+// Staff Loans tab — HR Admin only, same visibility as Contracts (2026-08-17,
+// redesigned 2026-08-19). Reference only — nothing here feeds payroll or
+// deducts anything automatically.
+//
+// Redesigned 2026-08-19 per Thijs: a loan is now a per-employee "cost
+// center" rather than one flat line item. Individual amounts can be
+// STACKED onto the same employee (e.g. a second advance while the first is
+// still being paid off) while the monthly deduction is a single figure per
+// employee that stays put unless deliberately changed — adding another
+// amount does not ask for the deduction again, it just carries forward.
+// Under the hood this still stores one row per stacked amount in
+// hr_staff_loans (no schema change): the MOST RECENT row's
+// monthly_deduction is treated as the employee's current rate, and the
+// "Edit deduction" control bulk-patches every one of that employee's rows
+// so the rate stays consistent no matter which row is "latest". Remaining
+// balance and months-to-payoff are estimated by simulating month-by-month
+// (add whatever was borrowed that month, then subtract one month's
+// deduction, floored at 0) from the employee's first loan to today — still
+// just a rough at-a-glance figure; if it and Thijs's own records disagree,
+// his records win.
 // ---------------------------------------------------------------------------
 
-function monthsSince(dateStr) {
-  const d = new Date(`${dateStr}T00:00:00`)
-  const now = new Date()
-  if (now <= d) return 0
-  let months = (now.getFullYear() - d.getFullYear()) * 12 + (now.getMonth() - d.getMonth())
-  if (now.getDate() < d.getDate()) months -= 1
-  return Math.max(0, months)
+function firstOfMonth(d) {
+  return new Date(d.getFullYear(), d.getMonth(), 1)
+}
+
+// Simulates one pooled balance for all of an employee's stacked loan
+// amounts: walk month by month from the earliest loan's month to the
+// current month, adding any amounts dated in that month, then subtracting
+// one month's deduction (skipped for the very first month, since the loan
+// was only taken partway through it) — floored at 0.
+function simulateLoanCenter(empLoans) {
+  const sorted = [...empLoans].sort((a, b) => (a.loan_date < b.loan_date ? -1 : a.loan_date > b.loan_date ? 1 : 0))
+  const totalBorrowed = sorted.reduce((s, l) => s + Number(l.amount || 0), 0)
+  const deduction = Number(sorted[sorted.length - 1]?.monthly_deduction || 0)
+
+  let balance = 0
+  let li = 0
+  let cursor = firstOfMonth(parseDateOnly(sorted[0].loan_date))
+  const nowStart = firstOfMonth(new Date())
+  let firstMonth = true
+  while (cursor.getTime() <= nowStart.getTime()) {
+    while (li < sorted.length && firstOfMonth(parseDateOnly(sorted[li].loan_date)).getTime() === cursor.getTime()) {
+      balance += Number(sorted[li].amount || 0)
+      li++
+    }
+    if (!firstMonth && deduction > 0) balance = Math.max(0, balance - deduction)
+    firstMonth = false
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
+  }
+
+  const monthsToPayOff = deduction > 0 && balance > 0 ? Math.ceil(balance / deduction) : deduction > 0 ? 0 : null
+  return { loans: sorted, totalBorrowed, deduction, balance, monthsToPayOff }
 }
 
 function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
-  const [form, setForm] = useState({
-    employee_id: '',
-    loan_date: todayStr(),
-    amount: '',
-    monthly_deduction: '',
-    notes: '',
-  })
+  const [form, setForm] = useState({ employee_id: '', loan_date: todayStr(), amount: '', monthly_deduction: '', notes: '' })
   const [saving, setSaving] = useState(false)
+  const [deductionEdits, setDeductionEdits] = useState({}) // employee_id -> in-progress edit value
+  const [savingDeductionFor, setSavingDeductionFor] = useState(null)
+
+  const empName = (id) => {
+    const e = employees.find((x) => x.id === id)
+    return e ? `${e.first_name} ${e.last_name}` : 'Unknown'
+  }
+
+  const loanCenters = useMemo(() => {
+    const byEmp = {}
+    for (const l of loans) {
+      if (!byEmp[l.employee_id]) byEmp[l.employee_id] = []
+      byEmp[l.employee_id].push(l)
+    }
+    return Object.keys(byEmp)
+      .map((employee_id) => ({ employee_id, ...simulateLoanCenter(byEmp[employee_id]) }))
+      .sort((a, b) => b.balance - a.balance)
+  }, [loans])
+
+  const centerByEmployeeId = useMemo(() => {
+    const map = {}
+    for (const c of loanCenters) map[c.employee_id] = c
+    return map
+  }, [loanCenters])
+
+  // Selecting an employee who already has a loan center prefills the
+  // deduction with their current rate (so it "stays the same" by default —
+  // Thijs can still change it before saving if the rate itself changed).
+  function chooseEmployee(id) {
+    const existing = centerByEmployeeId[id]
+    setForm({
+      employee_id: id,
+      loan_date: todayStr(),
+      amount: '',
+      monthly_deduction: existing ? String(existing.deduction || '') : '',
+      notes: '',
+    })
+  }
 
   async function addLoan() {
     if (!form.employee_id || !form.amount) return
@@ -4128,36 +4205,40 @@ function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
     onRemove(id)
   }
 
-  const empName = (id) => {
-    const e = employees.find((x) => x.id === id)
-    return e ? `${e.first_name} ${e.last_name}` : 'Unknown'
+  async function saveDeduction(employeeId) {
+    const raw = deductionEdits[employeeId]
+    if (raw === undefined) return
+    const value = raw === '' ? 0 : Number(raw)
+    setSavingDeductionFor(employeeId)
+    const rows = await sb.update('hr_staff_loans', { employee_id: employeeId, company_id: companyId }, { monthly_deduction: value })
+    for (const row of rows || []) onUpdate(row)
+    setSavingDeductionFor(null)
+    setDeductionEdits((prev) => {
+      const next = { ...prev }
+      delete next[employeeId]
+      return next
+    })
   }
-
-  const sortedLoans = useMemo(
-    () => [...loans].sort((a, b) => (a.loan_date < b.loan_date ? 1 : -1)),
-    [loans]
-  )
 
   return (
     <>
       <div style={styles.card}>
         <div style={styles.cardTitle}>Log a staff loan</div>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-          Reference only — nothing here feeds payroll or deducts anything automatically. Just a place to
-          keep track of what's owed and the agreed monthly deduction. HR Admin only, same as Contracts.
+          Reference only — nothing here feeds payroll or deducts anything automatically. Choosing an
+          employee who already has a loan on record stacks this amount onto their existing balance and
+          carries their current monthly deduction forward (change it below if the rate itself changed).
+          HR Admin only, same as Contracts.
         </div>
         <div style={styles.formGrid}>
           <div>
             <label style={styles.label}>Employee</label>
-            <select
-              style={styles.input}
-              value={form.employee_id}
-              onChange={(e) => setForm({ ...form, employee_id: e.target.value })}
-            >
+            <select style={styles.input} value={form.employee_id} onChange={(e) => chooseEmployee(e.target.value)}>
               <option value="">Choose employee…</option>
               {employees.map((e) => (
                 <option key={e.id} value={e.id}>
                   {e.first_name} {e.last_name}
+                  {centerByEmployeeId[e.id] ? ` (existing balance R ${fmt(centerByEmployeeId[e.id].balance)})` : ''}
                 </option>
               ))}
             </select>
@@ -4181,7 +4262,7 @@ function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
             />
           </div>
           <div>
-            <label style={styles.label}>Monthly deduction</label>
+            <label style={styles.label}>Monthly deduction{form.employee_id && centerByEmployeeId[form.employee_id] ? ' (current rate)' : ''}</label>
             <input
               type="number"
               style={styles.input}
@@ -4195,58 +4276,93 @@ function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
           </div>
         </div>
         <button style={styles.button} onClick={addLoan} disabled={saving}>
-          {saving ? 'Saving…' : 'Add loan'}
+          {saving ? 'Saving…' : form.employee_id && centerByEmployeeId[form.employee_id] ? 'Add to balance' : 'Add loan'}
         </button>
       </div>
 
       <div style={styles.card}>
-        <div style={styles.cardTitle}>{sortedLoans.length} staff loan{sortedLoans.length === 1 ? '' : 's'}</div>
-        <div style={styles.tableWrap}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Employee</th>
-                <th style={styles.th}>Loan date</th>
-                <th style={styles.th}>Amount</th>
-                <th style={styles.th}>Monthly deduction</th>
-                <th style={styles.th}>Est. remaining</th>
-                <th style={styles.th}>Notes</th>
-                <th style={styles.th}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {sortedLoans.map((l) => {
-                const months = monthsSince(l.loan_date)
-                const estRemaining =
-                  l.monthly_deduction > 0
-                    ? Math.max(0, Number(l.amount) - Number(l.monthly_deduction) * months)
-                    : Number(l.amount)
-                return (
-                  <tr key={l.id}>
-                    <td style={styles.td}>{empName(l.employee_id)}</td>
-                    <td style={styles.td}>{l.loan_date}</td>
-                    <td style={styles.tdNum}>R {fmt(l.amount)}</td>
-                    <td style={styles.tdNum}>{l.monthly_deduction ? `R ${fmt(l.monthly_deduction)}` : '—'}</td>
-                    <td style={styles.tdNum}>R {fmt(estRemaining)}</td>
-                    <td style={styles.td}>{l.notes || '—'}</td>
-                    <td style={styles.td}>
-                      <button style={styles.buttonDanger} onClick={() => removeLoan(l.id)}>
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                )
-              })}
-              {sortedLoans.length === 0 && (
-                <tr>
-                  <td style={styles.td} colSpan={7}>
-                    No loans logged yet.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        <div style={styles.cardTitle}>
+          {loanCenters.length} employee{loanCenters.length === 1 ? '' : 's'} with a loan balance
         </div>
+        {loanCenters.length === 0 && <div style={{ fontSize: 12, color: colors.muted }}>No loans logged yet.</div>}
+        {loanCenters.map((c) => {
+          const editing = deductionEdits[c.employee_id] !== undefined
+          return (
+            <div key={c.employee_id} style={{ ...styles.card, background: 'rgba(255,255,255,.02)', marginTop: 10 }}>
+              <div style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: colors.goldLt }}>{empName(c.employee_id)}</div>
+                <div style={{ ...styles.row, gap: 20, flexWrap: 'wrap' }}>
+                  <div>
+                    <div style={{ fontSize: 16, fontFamily: fonts.mono, color: colors.cream }}>R {fmt(c.totalBorrowed)}</div>
+                    <div style={{ fontSize: 10, color: colors.muted }}>Total borrowed</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 16, fontFamily: fonts.mono, color: c.balance > 0 ? colors.danger : colors.ok }}>
+                      R {fmt(c.balance)}
+                    </div>
+                    <div style={{ fontSize: 10, color: colors.muted }}>Est. remaining</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 16, fontFamily: fonts.mono, color: colors.cream }}>
+                      {c.monthsToPayOff === null ? '—' : c.monthsToPayOff === 0 ? 'Paid off' : `${c.monthsToPayOff} mo`}
+                    </div>
+                    <div style={{ fontSize: 10, color: colors.muted }}>Est. months left</div>
+                  </div>
+                  <div>
+                    <label style={{ ...styles.label, marginBottom: 2 }}>Monthly deduction</label>
+                    <div style={{ ...styles.row, gap: 6 }}>
+                      <input
+                        type="number"
+                        style={{ ...styles.smallInput, width: 90 }}
+                        value={editing ? deductionEdits[c.employee_id] : c.deduction}
+                        onChange={(e) => setDeductionEdits((prev) => ({ ...prev, [c.employee_id]: e.target.value }))}
+                      />
+                      {editing && (
+                        <button
+                          style={{ ...styles.buttonGhost, padding: '3px 8px', fontSize: 12 }}
+                          onClick={() => saveDeduction(c.employee_id)}
+                          disabled={savingDeductionFor === c.employee_id}
+                        >
+                          {savingDeductionFor === c.employee_id ? 'Saving…' : 'Save'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ ...styles.tableWrap, marginTop: 10 }}>
+                <table style={styles.table}>
+                  <thead>
+                    <tr>
+                      <th style={styles.th}>Loan date</th>
+                      <th style={styles.th}>Amount</th>
+                      <th style={styles.th}>Notes</th>
+                      <th style={styles.th}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {c.loans
+                      .slice()
+                      .sort((a, b) => (a.loan_date < b.loan_date ? 1 : -1))
+                      .map((l) => (
+                        <tr key={l.id}>
+                          <td style={styles.td}>{l.loan_date}</td>
+                          <td style={styles.tdNum}>R {fmt(l.amount)}</td>
+                          <td style={styles.td}>{l.notes || '—'}</td>
+                          <td style={styles.td}>
+                            <button style={styles.buttonDanger} onClick={() => removeLoan(l.id)}>
+                              Delete
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )
+        })}
       </div>
     </>
   )
