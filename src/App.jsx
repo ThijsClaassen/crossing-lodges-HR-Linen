@@ -2762,6 +2762,46 @@ function UniformsTab({
   const [issueForm, setIssueForm] = useState({ item_id: '', employee_id: '' })
   const [issuing, setIssuing] = useState(false)
 
+  // Staff sizes & stock recommendation (2026-08-19) — what current
+  // (active) staff are actually wearing, broken down by size, compared
+  // against what's on hand, so Thijs can see which sizes to keep more of.
+  // Sizes are their own catalog rows already (per the "add each size as
+  // its own item" convention above), so stockByItem[it.id] IS the
+  // per-size stock level — no extra join needed beyond what's already
+  // passed into this component. "short" is flagged two ways: on_hand at
+  // or below the min_units threshold already used elsewhere in this app
+  // (see lowStockRows), OR fewer on hand than are currently issued to
+  // active staff — a size where, if a few break/wear out at once, there's
+  // nothing to replace them with.
+  const sizeBreakdown = useMemo(() => {
+    const activeIds = new Set(employees.filter((e) => e.active).map((e) => e.id))
+    const groups = {}
+    for (const it of items) {
+      const key = `${it.name}|${it.category}`
+      if (!groups[key]) groups[key] = { name: it.name, category: it.category, sizes: [] }
+      const demand = issues.filter((i) => i.item_id === it.id && i.status === 'issued' && activeIds.has(i.employee_id)).length
+      const stock = stockByItem[it.id]
+      const onHand = Number(stock?.qty_on_hand ?? 0)
+      const minUnits = Number(stock?.min_units ?? 0)
+      groups[key].sizes.push({
+        id: it.id,
+        size: it.size || '—',
+        demand,
+        onHand,
+        minUnits,
+        short: onHand < demand || onHand <= minUnits,
+      })
+    }
+    return Object.values(groups)
+      .map((g) => ({
+        ...g,
+        sizes: g.sizes.sort((a, b) => b.demand - a.demand),
+        totalDemand: g.sizes.reduce((s, x) => s + x.demand, 0),
+      }))
+      .filter((g) => g.totalDemand > 0)
+      .sort((a, b) => b.totalDemand - a.totalDemand)
+  }, [items, issues, employees, stockByItem])
+
   async function addItem() {
     if (!itemForm.name.trim()) return
     setSavingItem(true)
@@ -2829,8 +2869,7 @@ function UniformsTab({
   return (
     <>
       {isAdmin && (
-        <div style={styles.card}>
-          <div style={styles.cardTitle}>Add uniform item</div>
+        <CollapsibleCard title="Add uniform item">
           <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
             One shared pool for the whole company — add each size as its own item (e.g. "Polo Shirt"
             size 'M' and size 'L' as two separate rows).
@@ -2882,11 +2921,10 @@ function UniformsTab({
           <button style={styles.button} onClick={addItem} disabled={savingItem}>
             {savingItem ? 'Adding…' : 'Add item'}
           </button>
-        </div>
+        </CollapsibleCard>
       )}
 
-      <div style={styles.card}>
-        <div style={styles.cardTitle}>Issue an item</div>
+      <CollapsibleCard title="Issue an item" defaultOpen>
         <div style={styles.formGrid}>
           <div>
             <label style={styles.label}>Employee</label>
@@ -2914,10 +2952,9 @@ function UniformsTab({
         <button style={styles.button} onClick={issueNew} disabled={issuing || !issueForm.item_id || !issueForm.employee_id}>
           {issuing ? 'Issuing…' : 'Issue item'}
         </button>
-      </div>
+      </CollapsibleCard>
 
-      <div style={styles.card}>
-        <div style={styles.cardTitle}>Employees</div>
+      <CollapsibleCard title="Employees" defaultOpen>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
           Click a name to see everything they've been issued, and to mark items broken/replaced or
           returned.
@@ -2958,11 +2995,57 @@ function UniformsTab({
           </tbody>
         </table>
         </div>
-      </div>
+      </CollapsibleCard>
+
+      {isAdmin && sizeBreakdown.length > 0 && (
+        <CollapsibleCard title="Staff Sizes & Stock Recommendations">
+          <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+            What active staff currently have issued, broken down by size, against what's on hand. "Stock up"
+            means either you're at or below your own reorder minimum, or there are fewer on hand than are
+            currently out being worn — worth keeping more of these sizes on the shelf.
+          </div>
+          {sizeBreakdown.map((g) => (
+            <div key={`${g.name}|${g.category}`} style={{ marginBottom: 16 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                {g.name} <span style={{ color: colors.muted, fontWeight: 400, fontSize: 12 }}>({g.category})</span>
+              </div>
+              <div style={styles.tableWrap}>
+                <table style={styles.table}>
+                  <thead>
+                    <tr>
+                      <th style={styles.th}>Size</th>
+                      <th style={styles.th}>Currently worn</th>
+                      <th style={styles.th}>On hand</th>
+                      <th style={styles.th}>Min</th>
+                      <th style={styles.th}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {g.sizes.map((s) => (
+                      <tr key={s.id}>
+                        <td style={styles.td}>{s.size}</td>
+                        <td style={styles.tdNum}>{s.demand}</td>
+                        <td style={styles.tdNum}>{fmt(s.onHand, 0)}</td>
+                        <td style={styles.tdNum}>{fmt(s.minUnits, 0)}</td>
+                        <td style={styles.td}>
+                          {s.short && s.demand > 0 ? (
+                            <span style={styles.badge('bad')}>Stock up</span>
+                          ) : s.demand > 0 ? (
+                            <span style={styles.badge('good')}>OK</span>
+                          ) : null}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </CollapsibleCard>
+      )}
 
       {isAdmin && (
-        <div style={styles.card}>
-          <div style={styles.cardTitle}>Stock levels</div>
+        <CollapsibleCard title="Stock levels">
           <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
             "On hand" changes automatically when items are issued/replaced/returned — edit it directly
             here when new stock arrives from a supplier, or to correct a count.
@@ -3056,7 +3139,7 @@ function UniformsTab({
             </tbody>
           </table>
           </div>
-        </div>
+        </CollapsibleCard>
       )}
     </>
   )
