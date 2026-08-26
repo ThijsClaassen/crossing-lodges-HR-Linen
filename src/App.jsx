@@ -1904,7 +1904,7 @@ function ScheduleTab({
           <div>
             <label style={styles.label}>Min guests</label>
             <input
-              type="number"
+              type="number" inputMode="decimal"
               min="0"
               style={styles.input}
               value={ratioForm.min_guests}
@@ -1914,7 +1914,7 @@ function ScheduleTab({
           <div>
             <label style={styles.label}>Max guests (blank = and above)</label>
             <input
-              type="number"
+              type="number" inputMode="decimal"
               min="0"
               style={styles.input}
               value={ratioForm.max_guests}
@@ -1924,7 +1924,7 @@ function ScheduleTab({
           <div>
             <label style={styles.label}>Staff required</label>
             <input
-              type="number"
+              type="number" inputMode="decimal"
               min="0"
               style={styles.input}
               value={ratioForm.required_count}
@@ -2219,7 +2219,7 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
                     </td>
                     <td style={styles.td}>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         style={styles.smallInput}
                         defaultValue={e.annual_leave_days ?? 0}
                         onBlur={(ev) => saveAllocation(e.id, ev.target.value)}
@@ -2896,7 +2896,7 @@ function UniformsTab({
             <div>
               <label style={styles.label}>Price</label>
               <input
-                type="number"
+                type="number" inputMode="decimal"
                 style={styles.input}
                 value={itemForm.price}
                 onChange={(e) => setItemForm({ ...itemForm, price: e.target.value })}
@@ -3097,7 +3097,7 @@ function UniformsTab({
                     </td>
                     <td style={styles.td}>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         style={styles.smallInput}
                         defaultValue={it.price ?? 0}
                         onBlur={(e) => updateItem(it.id, { price: Number(e.target.value) || 0 })}
@@ -3105,7 +3105,7 @@ function UniformsTab({
                     </td>
                     <td style={styles.td}>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         style={styles.smallInput}
                         defaultValue={stock?.qty_on_hand ?? 0}
                         onBlur={(e) => saveStock(it.id, 'qty_on_hand', e.target.value)}
@@ -3114,7 +3114,7 @@ function UniformsTab({
                     <td style={styles.tdNum}>R {fmt(value)}</td>
                     <td style={styles.td}>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         style={styles.smallInput}
                         defaultValue={stock?.min_units ?? 0}
                         onBlur={(e) => saveStock(it.id, 'min_units', e.target.value)}
@@ -3122,7 +3122,7 @@ function UniformsTab({
                     </td>
                     <td style={styles.td}>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         style={styles.smallInput}
                         defaultValue={stock?.max_units ?? 0}
                         onBlur={(e) => saveStock(it.id, 'max_units', e.target.value)}
@@ -3345,7 +3345,7 @@ function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemA
             <div>
               <label style={styles.label}>Price</label>
               <input
-                type="number"
+                type="number" inputMode="decimal"
                 style={styles.input}
                 value={itemForm.price}
                 onChange={(e) => setItemForm({ ...itemForm, price: e.target.value })}
@@ -3402,7 +3402,7 @@ function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemA
           </div>
           <div>
             <label style={styles.label}>Qty</label>
-            <input type="number" style={styles.input} value={moveForm.qty} onChange={(e) => setMoveForm({ ...moveForm, qty: e.target.value })} />
+            <input type="number" inputMode="decimal" style={styles.input} value={moveForm.qty} onChange={(e) => setMoveForm({ ...moveForm, qty: e.target.value })} />
           </div>
           <div>
             <label style={styles.label}>Note (optional)</label>
@@ -3501,7 +3501,7 @@ function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemA
                     </td>
                     <td style={styles.td}>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         style={styles.smallInput}
                         defaultValue={it.price ?? 0}
                         onBlur={(e) => updateItem(it.id, { price: Number(e.target.value) || 0 })}
@@ -3509,7 +3509,7 @@ function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemA
                     </td>
                     <td style={styles.td}>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         style={styles.smallInput}
                         defaultValue={s?.qty_on_hand ?? 0}
                         onBlur={(e) => saveStockField(it.id, 'qty_on_hand', e.target.value)}
@@ -3518,7 +3518,7 @@ function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemA
                     <td style={styles.tdNum}>R {fmt(value)}</td>
                     <td style={styles.td}>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         style={styles.smallInput}
                         defaultValue={s?.min_units ?? 0}
                         onBlur={(e) => saveStockField(it.id, 'min_units', e.target.value)}
@@ -3526,7 +3526,7 @@ function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemA
                     </td>
                     <td style={styles.td}>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         style={styles.smallInput}
                         defaultValue={s?.max_units ?? 0}
                         onBlur={(e) => saveStockField(it.id, 'max_units', e.target.value)}
@@ -4143,7 +4143,7 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
               <div>
                 <label style={styles.label}>Salary</label>
                 <input
-                  type="number"
+                  type="number" inputMode="decimal"
                   style={styles.input}
                   value={form.salary}
                   onChange={(e) => setForm({ ...form, salary: e.target.value })}
@@ -4173,7 +4173,7 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
                   <div>
                     <label style={styles.label}>Medical aid — company cost/month</label>
                     <input
-                      type="number"
+                      type="number" inputMode="decimal"
                       style={styles.input}
                       value={form.medical_aid_monthly_cost}
                       onChange={(e) => setForm({ ...form, medical_aid_monthly_cost: e.target.value })}
@@ -4205,7 +4205,7 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
                   <div>
                     <label style={styles.label}>Pension — company cost/month</label>
                     <input
-                      type="number"
+                      type="number" inputMode="decimal"
                       style={styles.input}
                       value={form.pension_fund_monthly_cost}
                       onChange={(e) => setForm({ ...form, pension_fund_monthly_cost: e.target.value })}
@@ -4216,7 +4216,7 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
               <div>
                 <label style={styles.label}>Housing cost/month (electricity, water, upkeep etc.)</label>
                 <input
-                  type="number"
+                  type="number" inputMode="decimal"
                   style={styles.input}
                   value={form.housing_monthly_cost}
                   onChange={(e) => setForm({ ...form, housing_monthly_cost: e.target.value })}
@@ -4490,7 +4490,7 @@ function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
           <div>
             <label style={styles.label}>Amount</label>
             <input
-              type="number"
+              type="number" inputMode="decimal"
               style={styles.input}
               value={form.amount}
               onChange={(e) => setForm({ ...form, amount: e.target.value })}
@@ -4499,7 +4499,7 @@ function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
           <div>
             <label style={styles.label}>Monthly deduction{form.employee_id && centerByEmployeeId[form.employee_id] ? ' (current rate)' : ''}</label>
             <input
-              type="number"
+              type="number" inputMode="decimal"
               style={styles.input}
               value={form.monthly_deduction}
               onChange={(e) => setForm({ ...form, monthly_deduction: e.target.value })}
@@ -4547,7 +4547,7 @@ function LoansTab({ companyId, employees, loans, onAdd, onUpdate, onRemove }) {
                     <label style={{ ...styles.label, marginBottom: 2 }}>Monthly deduction</label>
                     <div style={{ ...styles.row, gap: 6 }}>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         style={{ ...styles.smallInput, width: 90 }}
                         value={editing ? deductionEdits[c.employee_id] : c.deduction}
                         onChange={(e) => setDeductionEdits((prev) => ({ ...prev, [c.employee_id]: e.target.value }))}
@@ -4682,7 +4682,7 @@ function AddPaymentModal({ employeeName, currentBalance, onClose, onSave }) {
           </div>
           <div>
             <label style={styles.label}>Amount</label>
-            <input type="number" style={styles.input} value={amount} onChange={(e) => setAmount(e.target.value)} />
+            <input type="number" inputMode="decimal" style={styles.input} value={amount} onChange={(e) => setAmount(e.target.value)} />
           </div>
           <div>
             <label style={styles.label}>Notes (optional)</label>
