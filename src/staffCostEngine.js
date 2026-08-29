@@ -35,9 +35,13 @@
 // have no schedule_locations rows at all, so they show "no schedule data"
 // for their food/bev share rather than a fabricated number.
 
-import { sb } from './sb.js'
+import { sb, LOCATIONS } from './sb.js'
 
-const LOCATIONS_LIST = ['ZC', 'EC', 'SC']
+// Was a hardcoded ['ZC','EC','SC'] (2026-08-27). Lodges became dynamic in the
+// multi-tenant work, so a company whose lodge ids differ would have had every
+// food/bev cost-per-head silently come out as zero here — the same latent bug
+// already fixed in the Ops app's data load. Reads the live list instead.
+const locationList = () => LOCATIONS.map((l) => l.id)
 
 function periodOf(dateStr) {
   return dateStr.slice(0, 7) // 'YYYY-MM'
@@ -260,7 +264,7 @@ export async function getRealStaffCostOverview({ companyId, employees, contracts
   // and also what each employee's share is looked up from.
   const locationWeeks = []
   const costPerHead = {} // `${location}|${week}` -> number
-  for (const loc of LOCATIONS_LIST) {
+  for (const loc of locationList()) {
     for (const week of weeks) {
       const key = `${loc}|${week}`
       const food = foodByWeek[key] || 0
@@ -272,7 +276,7 @@ export async function getRealStaffCostOverview({ companyId, employees, contracts
     }
   }
 
-  const locationSummary = LOCATIONS_LIST.map((loc) => {
+  const locationSummary = locationList().map((loc) => {
     const rows = locationWeeks.filter((r) => r.location === loc)
     const totalFood = rows.reduce((s, r) => s + r.food, 0)
     const totalBev = rows.reduce((s, r) => s + r.bev, 0)
