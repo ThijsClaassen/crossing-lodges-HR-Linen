@@ -564,6 +564,9 @@ function AuthenticatedApp() {
   // as Contracts. No deduction automation: just a place for Thijs to record
   // an amount + a monthly deduction figure and see it later.
   const [loans, setLoans] = useState([])
+  // Bonuses (2026-08-27) — HR-Admin-only, same visibility wall as loans and
+  // contracts, since amounts are as sensitive as salary.
+  const [bonuses, setBonuses] = useState([])
   const [scheduleLocations, setScheduleLocations] = useState([])
   const [leave, setLeave] = useState([])
   // Which day the Schedule tab's display weeks start on (0=Sun..6=Sat).
@@ -598,6 +601,9 @@ function AuthenticatedApp() {
               ...base,
               sb.select('hr_contracts', { company_id: companyId }, {}),
               sb.select('hr_staff_loans', { company_id: companyId }, { order: 'loan_date.desc' }),
+              // .catch so a company that hasn't run add_hr_bonuses.sql yet
+              // still loads the rest of the app.
+              sb.select('hr_bonuses', { company_id: companyId }, { order: 'bonus_date.desc' }).catch(() => []),
             ]
           : base
       )
@@ -616,6 +622,7 @@ function AuthenticatedApp() {
         ratiosRes,
         conRes,
         loanRes,
+        bonusRes,
       ] = results
 
       setEmployees(empRes || [])
@@ -634,6 +641,7 @@ function AuthenticatedApp() {
       setStaffingRatios(ratiosRes || [])
       setContracts(conRes || [])
       setLoans(loanRes || [])
+      setBonuses(bonusRes || [])
     } catch (e) {
       setError(e.message)
     } finally {
@@ -1023,7 +1031,7 @@ function AuthenticatedApp() {
               />
             )}
             {activeTab === 'staffcost' && role === 'hradmin' && (
-              <StaffCostTab companyId={companyId} employees={employees} contracts={contracts} scheduleLocations={scheduleLocations} />
+              <StaffCostTab companyId={companyId} employees={employees} contracts={contracts} scheduleLocations={scheduleLocations} bonuses={bonuses} setBonuses={setBonuses} />
             )}
             {activeTab === 'loans' && role === 'hradmin' && (
               <LoansTab
@@ -3979,6 +3987,35 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
     onUpdate(row)
   }
 
+  async function addBonus() {
+    setBError('')
+    if (!bForm.employee_id || !bForm.amount) { setBError('Pick an employee and enter an amount.'); return }
+    setBSaving(true)
+    try {
+      const [row] = await sb.insert('hr_bonuses', {
+        company_id: companyId,
+        employee_id: bForm.employee_id,
+        bonus_date: bForm.bonus_date,
+        amount: Number(bForm.amount),
+        bonus_type: bForm.bonus_type.trim() || null,
+        note: bForm.note.trim() || null,
+      })
+      setBonuses((prev) => [row, ...prev])
+      setBForm({ employee_id: '', bonus_date: bForm.bonus_date, amount: '', bonus_type: '', note: '' })
+      run()  // recompute so the new bonus shows in the smoothed column
+    } catch (e) { setBError(e.message) }
+    finally { setBSaving(false) }
+  }
+
+  async function removeBonus(id) {
+    if (!window.confirm('Delete this bonus?')) return
+    try {
+      await sb.remove('hr_bonuses', { id })
+      setBonuses((prev) => prev.filter((b) => b.id !== id))
+      run()
+    } catch (e) { alert('Could not delete: ' + e.message) }
+  }
+
   const empName = (id) => {
     const e = employees.find((x) => x.id === id)
     return e ? `${e.first_name} ${e.last_name}` : 'Unknown'
@@ -4719,7 +4756,7 @@ function AddPaymentModal({ employeeName, currentBalance, onClose, onSave }) {
 // location that week — see staffCostEngine.js for the full calculation).
 // ---------------------------------------------------------------------------
 
-function StaffCostTab({ companyId, employees, contracts, scheduleLocations }) {
+function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonuses, setBonuses }) {
   const today = todayStr()
   const defaultStart = (() => {
     const d = new Date(`${today}T00:00:00`)
@@ -4731,6 +4768,11 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations }) {
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  // Bonus logging (2026-08-27). Lives here rather than on Employees because
+  // this is the screen where you'd notice a bonus is missing from the cost.
+  const [bForm, setBForm] = useState({ employee_id: '', bonus_date: todayStr(), amount: '', bonus_type: '', note: '' })
+  const [bSaving, setBSaving] = useState(false)
+  const [bError, setBError] = useState('')
 
   async function run() {
     setLoading(true)
@@ -4761,6 +4803,9 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations }) {
   }, [result])
 
   const grandTotal = sortedEmployeeRows.reduce((s, r) => s + r.totalMonthly, 0)
+  // Kept apart from grandTotal on purpose: leave owed is a liability you'd
+  // settle if people left, not part of what staff cost you each month.
+  const grandLeaveProvision = sortedEmployeeRows.reduce((s, r) => s + (r.leaveProvision || 0), 0)
 
   return (
     <>
@@ -4772,6 +4817,16 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations }) {
           "Staff") and divided by however many staff were scheduled at that location each week. Employees with no
           Schedule entries in the chosen range show a Food/Bev share of R0 — add them to the Schedule tab to include
           them.
+          <br /><br />
+          <strong>Uniforms</strong> come from what was actually issued to each person in the Uniforms tab, priced at
+          each item's own price, and <strong>Bonuses</strong> from what's been logged below. Both are lumpy by nature
+          — a jacket or a 13th cheque lands in one month — so both are shown as the last 12 months spread evenly
+          over 12, which makes people comparable. Hover either figure to see the actual 12-month total.
+          <br /><br />
+          <strong>Leave owed</strong> sits outside the monthly total on purpose. Pay received while on leave is
+          already inside the salary, so counting it again would inflate every figure here. What's shown instead is
+          the value of leave accrued but not yet taken — what you'd owe if someone left tomorrow — valued on salary
+          alone, since medical aid and pension carry on regardless.
         </div>
         <div style={styles.formGrid}>
           <div>
@@ -4839,7 +4894,10 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations }) {
                     <th style={styles.th}>Pension</th>
                     <th style={styles.th}>Housing</th>
                     <th style={styles.th}>Food + Bev share</th>
+                    <th style={styles.th}>Uniforms /mo</th>
+                    <th style={styles.th}>Bonuses /mo</th>
                     <th style={styles.th}>Real cost/month</th>
+                    <th style={styles.th}>Leave owed</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -4853,14 +4911,23 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations }) {
                       <td style={styles.tdNum}>
                         {r.hasScheduleData ? `R ${fmt(r.foodBevMonthly)}` : <span style={styles.badge('neutral')}>no schedule data</span>}
                       </td>
+                      <td style={styles.tdNum} title={r.uniform12mo ? `R ${fmt(r.uniform12mo)} issued in the last 12 months` : undefined}>
+                        {r.uniformMonthly ? `R ${fmt(r.uniformMonthly)}` : '—'}
+                      </td>
+                      <td style={styles.tdNum} title={r.bonus12mo ? `R ${fmt(r.bonus12mo)} paid in the last 12 months` : undefined}>
+                        {r.bonusMonthly ? `R ${fmt(r.bonusMonthly)}` : '—'}
+                      </td>
                       <td style={styles.tdNum}>
                         <strong>R {fmt(r.totalMonthly)}</strong>
+                      </td>
+                      <td style={styles.tdNum} title={`${fmt(r.leaveDaysOwed, 1)} days owed of ${fmt(r.leaveDaysEntitled, 0)} (${fmt(r.leaveDaysTaken, 1)} taken)`}>
+                        {r.leaveProvision ? `R ${fmt(r.leaveProvision)}` : '—'}
                       </td>
                     </tr>
                   ))}
                   {sortedEmployeeRows.length === 0 && (
                     <tr>
-                      <td style={styles.td} colSpan={7}>
+                      <td style={styles.td} colSpan={9}>
                         No employees yet.
                       </td>
                     </tr>
@@ -4872,9 +4939,12 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations }) {
                       <td style={styles.td}>
                         <strong>Total</strong>
                       </td>
-                      <td style={styles.td} colSpan={5} />
+                      <td style={styles.td} colSpan={7} />
                       <td style={styles.tdNum}>
                         <strong>R {fmt(grandTotal)}</strong>
+                      </td>
+                      <td style={styles.tdNum}>
+                        <strong>R {fmt(grandLeaveProvision)}</strong>
                       </td>
                     </tr>
                   </tfoot>
@@ -4884,6 +4954,77 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations }) {
           </div>
         </>
       )}
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Bonuses</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Log a bonus and it feeds the Bonuses column above, spread over 12 months. Unlike uniforms and leave there
+          is nothing in the system to read a bonus from, so these have to be entered.
+        </div>
+        <div style={styles.formGrid}>
+          <div>
+            <label style={styles.label}>Employee</label>
+            <select style={styles.input} value={bForm.employee_id} onChange={(e) => setBForm({ ...bForm, employee_id: e.target.value })}>
+              <option value="">Select…</option>
+              {[...employees]
+                .sort((a, b) => `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`))
+                .map((e) => (
+                  <option key={e.id} value={e.id}>{e.first_name} {e.last_name}</option>
+                ))}
+            </select>
+          </div>
+          <div>
+            <label style={styles.label}>Date</label>
+            <input type="date" style={styles.input} value={bForm.bonus_date} onChange={(e) => setBForm({ ...bForm, bonus_date: e.target.value })} />
+          </div>
+          <div>
+            <label style={styles.label}>Amount (R)</label>
+            <input type="number" inputMode="decimal" style={styles.input} value={bForm.amount} onChange={(e) => setBForm({ ...bForm, amount: e.target.value })} />
+          </div>
+          <div>
+            <label style={styles.label}>Type</label>
+            <input type="text" style={styles.input} placeholder="e.g. 13th cheque, performance" value={bForm.bonus_type} onChange={(e) => setBForm({ ...bForm, bonus_type: e.target.value })} />
+          </div>
+          <div>
+            <label style={styles.label}>Note</label>
+            <input type="text" style={styles.input} value={bForm.note} onChange={(e) => setBForm({ ...bForm, note: e.target.value })} />
+          </div>
+        </div>
+        {bError && <div style={{ color: colors.danger, fontSize: 12, marginTop: 6 }}>{bError}</div>}
+        <button style={styles.button} onClick={addBonus} disabled={bSaving}>{bSaving ? 'Saving…' : 'Log bonus'}</button>
+
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Date</th>
+                <th style={styles.th}>Employee</th>
+                <th style={styles.th}>Type</th>
+                <th style={styles.th}>Amount</th>
+                <th style={styles.th}>Note</th>
+                <th style={styles.th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {(bonuses || []).map((b) => (
+                <tr key={b.id}>
+                  <td style={styles.td}>{b.bonus_date}</td>
+                  <td style={styles.td}>{empName(b.employee_id)}</td>
+                  <td style={styles.td}>{b.bonus_type || '—'}</td>
+                  <td style={styles.tdNum}>R {fmt(b.amount)}</td>
+                  <td style={styles.td}>{b.note || '—'}</td>
+                  <td style={styles.td}>
+                    <button style={styles.buttonGhost} onClick={() => removeBonus(b.id)}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+              {(bonuses || []).length === 0 && (
+                <tr><td style={styles.td} colSpan={6}>No bonuses logged yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </>
   )
 }

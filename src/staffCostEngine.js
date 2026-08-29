@@ -146,8 +146,91 @@ const WEEKS_PER_MONTH = 4.345 // 52 / 12 — used to project a weekly average up
 // are passed in from App.jsx's own already-loaded state (avoids re-fetching
 // what's already in memory); Food/Beverage data is fetched fresh here since
 // nothing else in this app touches those tables.
+
+// ─── Uniforms, bonuses and accrued leave (2026-08-27) ────────────────────────
+// Thijs: "for staff cost, we need to add some cost. Leave pay, uniforms,
+// bonuses. Can we calculate uniforms from the uniform section?" — yes, and
+// leave too; only bonuses needed a new table.
+//
+// UNIFORMS and BONUSES are both lumpy: a R450 jacket or a 13th cheque lands in
+// one month and nothing the next. Charging them to the month they happened
+// makes a person look wildly expensive once a year and cheap otherwise, which
+// is useless for comparing people. So both are SMOOTHED: total over the last
+// 12 months, divided by 12. Confirmed with Thijs.
+//
+// LEAVE is deliberately NOT added to monthly cost. For monthly-salaried staff
+// the pay they receive while on leave is already inside their salary — adding
+// it again would double-count and overstate every cost-per-head figure. What
+// IS a real, uncounted cost is leave OWED BUT NOT TAKEN: if someone left
+// tomorrow you'd have to pay it out. That's reported as a separate provision
+// (a liability), not folded into the monthly total.
+
+const MONTHS_SMOOTHED = 12
+
+// 260 working days a year / 12 months. Used only to turn a monthly salary into
+// a day rate for valuing leave; nothing else depends on it.
+const WORKING_DAYS_PER_MONTH = 21.67
+
+function monthsAgoIso(months) {
+  const d = new Date()
+  d.setMonth(d.getMonth() - months)
+  return d.toISOString().slice(0, 10)
+}
+
+// Actual uniform spend per employee over the last 12 months, from real issues
+// priced at the item's own price. An item with no price contributes R0 — the
+// SQL file's verification query lists those so they can be filled in.
+export async function getUniformCostByEmployee({ companyId }) {
+  const since = monthsAgoIso(MONTHS_SMOOTHED)
+  const [issues, items] = await Promise.all([
+    sb.select('hr_uniform_issues', { company_id: companyId, issued_date: `gte.${since}` }, {}),
+    sb.select('hr_uniform_items', { company_id: companyId }, {}),
+  ])
+
+  const priceById = Object.fromEntries((items || []).map((i) => [i.id, Number(i.price || 0)]))
+  const total = {}
+  for (const iss of issues || []) {
+    if (!iss.employee_id) continue
+    total[iss.employee_id] = (total[iss.employee_id] || 0) + (priceById[iss.item_id] || 0)
+  }
+  return total // employee_id -> rand issued in the last 12 months
+}
+
+export async function getBonusesByEmployee({ companyId }) {
+  const since = monthsAgoIso(MONTHS_SMOOTHED)
+  // .catch-free but tolerant: a company that hasn't run add_hr_bonuses.sql yet
+  // should still see the rest of the report rather than an error page.
+  let data = []
+  try {
+    data = await sb.select('hr_bonuses', { company_id: companyId, bonus_date: `gte.${since}` }, {})
+  } catch {
+    return {}
+  }
+
+  const total = {}
+  for (const b of data || []) {
+    if (!b.employee_id) continue
+    total[b.employee_id] = (total[b.employee_id] || 0) + Number(b.amount || 0)
+  }
+  return total
+}
+
+// Days taken per employee, all-time — the entitlement on hr_employees is an
+// annual figure, so this is only meaningful against the current leave cycle.
+// Kept simple deliberately: it mirrors what the Leave tab itself already shows
+// staff, so the two can't disagree.
+export async function getLeaveDaysByEmployee({ companyId }) {
+  const data = await sb.select('hr_leave', { company_id: companyId }, {})
+  const used = {}
+  for (const l of data || []) {
+    if (!l.employee_id) continue
+    used[l.employee_id] = (used[l.employee_id] || 0) + Number(l.days_used || 0)
+  }
+  return used
+}
+
 export async function getRealStaffCostOverview({ companyId, employees, contracts, scheduleLocations, startDate, endDate }) {
-  const [foodByWeek, bevByWeek] = await Promise.all([
+  const [foodByWeek, bevByWeek, uniformByEmp, bonusByEmp, leaveUsedByEmp] = await Promise.all([
     getStaffIssueCostByWeek({
       companyId,
       issuesTable: 'food_issues',
@@ -164,6 +247,9 @@ export async function getRealStaffCostOverview({ companyId, employees, contracts
       startDate,
       endDate,
     }),
+    getUniformCostByEmployee({ companyId }),
+    getBonusesByEmployee({ companyId }),
+    getLeaveDaysByEmployee({ companyId }),
   ])
 
   const weeks = weeksBetween(startDate, endDate)
@@ -230,6 +316,21 @@ export async function getRealStaffCostOverview({ companyId, employees, contracts
     const housing = Number(contract?.housing_monthly_cost || 0)
     const foodBev = foodBevMonthly || 0
 
+    // Smoothed over 12 months — see the note above these helpers.
+    const uniform12mo = uniformByEmp[emp.id] || 0
+    const bonus12mo = bonusByEmp[emp.id] || 0
+    const uniformMonthly = uniform12mo / MONTHS_SMOOTHED
+    const bonusMonthly = bonus12mo / MONTHS_SMOOTHED
+
+    // Accrued leave — owed but not taken. Valued on SALARY only, not the
+    // loaded cost: a pay-out settles the leave pay, while medical aid and
+    // pension carry on regardless and aren't part of what you'd owe.
+    const leaveDaysEntitled = Number(emp.annual_leave_days || 0)
+    const leaveDaysTaken = leaveUsedByEmp[emp.id] || 0
+    const leaveDaysOwed = Math.max(0, leaveDaysEntitled - leaveDaysTaken)
+    const leaveDayRate = salary > 0 ? salary / WORKING_DAYS_PER_MONTH : 0
+    const leaveProvision = leaveDaysOwed * leaveDayRate
+
     return {
       employee: emp,
       contract,
@@ -239,7 +340,17 @@ export async function getRealStaffCostOverview({ companyId, employees, contracts
       housing,
       foodBevMonthly: foodBevMonthly,
       hasScheduleData: perHeadShares.length > 0,
-      totalMonthly: salary + healthcare + pension + housing + foodBev,
+      uniform12mo,
+      uniformMonthly,
+      bonus12mo,
+      bonusMonthly,
+      leaveDaysEntitled,
+      leaveDaysTaken,
+      leaveDaysOwed,
+      leaveProvision,
+      // Leave is NOT in this total — it's a liability, not a monthly cost, and
+      // the salary already covers pay taken during leave.
+      totalMonthly: salary + healthcare + pension + housing + foodBev + uniformMonthly + bonusMonthly,
     }
   })
 
