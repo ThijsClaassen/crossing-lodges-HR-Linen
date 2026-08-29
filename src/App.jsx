@@ -3987,35 +3987,6 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
     onUpdate(row)
   }
 
-  async function addBonus() {
-    setBError('')
-    if (!bForm.employee_id || !bForm.amount) { setBError('Pick an employee and enter an amount.'); return }
-    setBSaving(true)
-    try {
-      const [row] = await sb.insert('hr_bonuses', {
-        company_id: companyId,
-        employee_id: bForm.employee_id,
-        bonus_date: bForm.bonus_date,
-        amount: Number(bForm.amount),
-        bonus_type: bForm.bonus_type.trim() || null,
-        note: bForm.note.trim() || null,
-      })
-      setBonuses((prev) => [row, ...prev])
-      setBForm({ employee_id: '', bonus_date: bForm.bonus_date, amount: '', bonus_type: '', note: '' })
-      run()  // recompute so the new bonus shows in the smoothed column
-    } catch (e) { setBError(e.message) }
-    finally { setBSaving(false) }
-  }
-
-  async function removeBonus(id) {
-    if (!window.confirm('Delete this bonus?')) return
-    try {
-      await sb.remove('hr_bonuses', { id })
-      setBonuses((prev) => prev.filter((b) => b.id !== id))
-      run()
-    } catch (e) { alert('Could not delete: ' + e.message) }
-  }
-
   const empName = (id) => {
     const e = employees.find((x) => x.id === id)
     return e ? `${e.first_name} ${e.last_name}` : 'Unknown'
@@ -4791,6 +4762,35 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonu
     if (companyId) run()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companyId])
+
+  async function addBonus() {
+    setBError('')
+    if (!bForm.employee_id || !bForm.amount) { setBError('Pick an employee and enter an amount.'); return }
+    setBSaving(true)
+    try {
+      const [row] = await sb.insert('hr_bonuses', {
+        company_id: companyId,
+        employee_id: bForm.employee_id,
+        bonus_date: bForm.bonus_date,
+        amount: Number(bForm.amount),
+        bonus_type: bForm.bonus_type.trim() || null,
+        note: bForm.note.trim() || null,
+      })
+      setBonuses((prev) => [row, ...prev])
+      setBForm({ employee_id: '', bonus_date: bForm.bonus_date, amount: '', bonus_type: '', note: '' })
+      run()  // recompute so the new bonus shows in the smoothed column
+    } catch (e) { setBError(e.message) }
+    finally { setBSaving(false) }
+  }
+
+  async function removeBonus(id) {
+    if (!window.confirm('Delete this bonus?')) return
+    try {
+      await sb.remove('hr_bonuses', { id })
+      setBonuses((prev) => prev.filter((b) => b.id !== id))
+      run()
+    } catch (e) { alert('Could not delete: ' + e.message) }
+  }
 
   const empName = (id) => {
     const e = employees.find((x) => x.id === id)
