@@ -2261,67 +2261,6 @@ function LeaveTab({ companyId, employees, leave, entitlements, onUpdateEmployee,
         </button>
       </div>
 
-      <div style={styles.card}>
-        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
-          <div style={styles.cardTitle}>Balances — {selectedYear}</div>
-          <select style={{ ...styles.smallInput, width: 90 }} value={selectedYear} onChange={(e) => setSelectedYear(Number(e.target.value))}>
-            {availableYears.map((y) => (
-              <option key={y} value={y}>
-                {y}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-          Annual leave used in {selectedYear}. Statutory balances per leave type are below — those
-          run on each employee's own BCEA cycle, not the calendar year.
-        </div>
-        <div style={styles.tableWrap}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Employee</th>
-                <th style={styles.th}>Annual allowance</th>
-                <th style={styles.th}>Used ({selectedYear})</th>
-                <th style={styles.th}>Remaining</th>
-              </tr>
-            </thead>
-            <tbody>
-              {employees.map((e) => {
-                const used = usedByEmployee[e.id] || 0
-                const remaining = Number(e.annual_leave_days || 0) - used
-                return (
-                  <tr key={e.id}>
-                    <td style={styles.td}>
-                      {e.first_name} {e.last_name}
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        type="number" inputMode="decimal"
-                        style={styles.smallInput}
-                        defaultValue={e.annual_leave_days ?? 0}
-                        onBlur={(ev) => saveAllocation(e.id, ev.target.value)}
-                      />
-                    </td>
-                    <td style={styles.tdNum}>{fmt(used, 0)}</td>
-                    <td style={styles.tdNum}>
-                      <strong style={{ color: remaining < 0 ? colors.danger : colors.cream }}>{fmt(remaining, 0)}</strong>
-                    </td>
-                  </tr>
-                )
-              })}
-              {employees.length === 0 && (
-                <tr>
-                  <td style={styles.td} colSpan={4}>
-                    No employees yet.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
       {/* Statutory balances, per employee, per BCEA cycle.
           Deliberately per-employee rather than a grid of everyone: each type
           runs on its own cycle anchored to that person's start date, so a
@@ -2403,6 +2342,68 @@ function LeaveTab({ companyId, employees, leave, entitlements, onUpdateEmployee,
             </div>
           </>
         )}
+      </div>
+
+      <div style={styles.card}>
+        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
+          <div style={styles.cardTitle}>Balances — {selectedYear}</div>
+          <select style={{ ...styles.smallInput, width: 90 }} value={selectedYear} onChange={(e) => setSelectedYear(Number(e.target.value))}>
+            {availableYears.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Annual leave used in {selectedYear}, by calendar year. The statutory balances above are
+          the authoritative ones — those run on each employee's own BCEA cycle, not the calendar
+          year.
+        </div>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Employee</th>
+                <th style={styles.th}>Annual allowance</th>
+                <th style={styles.th}>Used ({selectedYear})</th>
+                <th style={styles.th}>Remaining</th>
+              </tr>
+            </thead>
+            <tbody>
+              {employees.map((e) => {
+                const used = usedByEmployee[e.id] || 0
+                const remaining = Number(e.annual_leave_days || 0) - used
+                return (
+                  <tr key={e.id}>
+                    <td style={styles.td}>
+                      {e.first_name} {e.last_name}
+                    </td>
+                    <td style={styles.td}>
+                      <input
+                        type="number" inputMode="decimal"
+                        style={styles.smallInput}
+                        defaultValue={e.annual_leave_days ?? 0}
+                        onBlur={(ev) => saveAllocation(e.id, ev.target.value)}
+                      />
+                    </td>
+                    <td style={styles.tdNum}>{fmt(used, 0)}</td>
+                    <td style={styles.tdNum}>
+                      <strong style={{ color: remaining < 0 ? colors.danger : colors.cream }}>{fmt(remaining, 0)}</strong>
+                    </td>
+                  </tr>
+                )
+              })}
+              {employees.length === 0 && (
+                <tr>
+                  <td style={styles.td} colSpan={4}>
+                    No employees yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div style={styles.card}>
