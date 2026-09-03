@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { sb, LOCATIONS, UNIFORM_CATEGORIES, LINEN_CATEGORIES, MOVEMENT_REASONS, CONTRACT_TYPES } from './sb.js'
 import { getRealStaffCostOverview } from './staffCostEngine.js'
+import { allBalances, entitlementForEmployee, LEAVE_TYPE_LABELS } from './leaveEngine.js'
 import { guestsByLodgeAndDate, requiredCountFor } from './staffingCoverageEngine.js'
 import { colors, fonts, css } from './theme.js'
 import { supabase } from './supabaseClient.js'
@@ -569,6 +570,7 @@ function AuthenticatedApp() {
   const [bonuses, setBonuses] = useState([])
   const [scheduleLocations, setScheduleLocations] = useState([])
   const [leave, setLeave] = useState([])
+  const [leaveEntitlements, setLeaveEntitlements] = useState([])
   // Which day the Schedule tab's display weeks start on (0=Sun..6=Sat).
   // Defaults to Monday until a company sets its own via hr_settings.
   const [weekStartDay, setWeekStartDay] = useState(1)
@@ -642,6 +644,19 @@ function AuthenticatedApp() {
       setContracts(conRes || [])
       setLoans(loanRes || [])
       setBonuses(bonusRes || [])
+
+      // Fetched on its own rather than added to the Promise.all above. That
+      // array has a conditional branch (hradmin gets three extra queries),
+      // and inserting into a positional structure like that is precisely how
+      // a previous change silently shifted every result by one — names still
+      // matched, wrong data behind each. The extra round-trip costs nothing;
+      // getting this wrong would be invisible. .catch so a company that
+      // hasn't run add_hr_leave_types.sql yet still loads the app, falling
+      // back to the BCEA defaults baked into leaveEngine.
+      const entRes = await sb
+        .select('hr_leave_entitlements', { company_id: companyId }, { order: 'sort_order.asc' })
+        .catch(() => [])
+      setLeaveEntitlements(entRes || [])
     } catch (e) {
       setError(e.message)
     } finally {
@@ -966,6 +981,7 @@ function AuthenticatedApp() {
                 companyId={companyId}
                 employees={employees}
                 leave={leave}
+                entitlements={leaveEntitlements}
                 onUpdateEmployee={updateLocalEmployee}
                 onLeaveAdd={addLocalLeave}
                 onLeaveRemove={removeLocalLeave}
@@ -2052,8 +2068,15 @@ function ScheduleTab({
 // nothing, since it wasn't going to be worked anyway.
 // ---------------------------------------------------------------------------
 
-function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, onLeaveRemove }) {
-  const [leaveForm, setLeaveForm] = useState({ employee_id: '', start_date: '', end_date: '', note: '' })
+function LeaveTab({ companyId, employees, leave, entitlements, onUpdateEmployee, onLeaveAdd, onLeaveRemove }) {
+  const [leaveForm, setLeaveForm] = useState({
+    employee_id: '',
+    leave_type: 'annual',
+    start_date: '',
+    end_date: '',
+    note: '',
+  })
+  const [balanceEmployeeId, setBalanceEmployeeId] = useState('')
   const [logging, setLogging] = useState(false)
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear())
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
@@ -2070,10 +2093,15 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
     return Array.from(set).sort((a, b) => b - a)
   }, [leave])
 
+  // ANNUAL ONLY. This table is the annual-leave allowance, so counting sick
+  // or family responsibility days here would show someone's holiday as used
+  // up because they were off sick — and the number would look perfectly
+  // plausible. Legacy rows have no leave_type and were all annual.
   const usedByEmployee = useMemo(() => {
     const map = {}
     for (const l of leave) {
       if (Number(l.start_date.slice(0, 4)) !== selectedYear) continue
+      if ((l.leave_type || 'annual') !== 'annual') continue
       map[l.employee_id] = (map[l.employee_id] || 0) + Number(l.days_used || 0)
     }
     return map
@@ -2108,6 +2136,24 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [yearEntries, employeeById])
 
+  // BCEA balances for the employee selected in the Statutory balances card.
+  // countWorkingDaysInRange is passed through rather than re-implemented in
+  // leaveEngine, so the 21-on/7-off rotation logic exists in exactly one
+  // place — two copies would drift and the copy driving balances is the one
+  // nobody would notice was wrong.
+  const balancesForSelected = useMemo(() => {
+    const emp = employeeById[balanceEmployeeId]
+    if (!emp) return []
+    const scoped = (entitlements || []).map((ent) => entitlementForEmployee(ent, emp))
+    return allBalances({
+      employee: emp,
+      entitlements: scoped,
+      leaveRows: leave,
+      asOf: new Date().toISOString().slice(0, 10),
+      workingDaysBetween: countWorkingDaysInRange,
+    })
+  }, [balanceEmployeeId, employeeById, entitlements, leave])
+
   async function saveAllocation(employeeId, value) {
     const [row] = await sb.update('hr_employees', { id: employeeId }, { annual_leave_days: Number(value) || 0 })
     onUpdateEmployee(row)
@@ -2122,13 +2168,20 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
     const [row] = await sb.insert('hr_leave', {
       company_id: companyId,
       employee_id: leaveForm.employee_id,
+      leave_type: leaveForm.leave_type || 'annual',
       start_date: leaveForm.start_date,
       end_date: leaveForm.end_date,
       days_used: daysUsed,
       note: leaveForm.note || null,
     })
     onLeaveAdd(row)
-    setLeaveForm({ employee_id: leaveForm.employee_id, start_date: '', end_date: '', note: '' })
+    setLeaveForm({
+      employee_id: leaveForm.employee_id,
+      leave_type: leaveForm.leave_type,
+      start_date: '',
+      end_date: '',
+      note: '',
+    })
     setLogging(false)
   }
 
@@ -2161,6 +2214,19 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
                   {e.first_name} {e.last_name}
                 </option>
               ))}
+            </select>
+          </div>
+          <div>
+            <label style={styles.label}>Leave type</label>
+            <select
+              style={styles.input}
+              value={leaveForm.leave_type}
+              onChange={(e) => setLeaveForm({ ...leaveForm, leave_type: e.target.value })}
+            >
+              <option value="annual">Annual leave</option>
+              <option value="sick">Sick leave</option>
+              <option value="family_responsibility">Family responsibility leave</option>
+              <option value="maternity">Maternity leave</option>
             </select>
           </div>
           <div>
@@ -2205,6 +2271,10 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
               </option>
             ))}
           </select>
+        </div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Annual leave used in {selectedYear}. Statutory balances per leave type are below — those
+          run on each employee's own BCEA cycle, not the calendar year.
         </div>
         <div style={styles.tableWrap}>
           <table style={styles.table}>
@@ -2252,6 +2322,89 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
         </div>
       </div>
 
+      {/* Statutory balances, per employee, per BCEA cycle.
+          Deliberately per-employee rather than a grid of everyone: each type
+          runs on its own cycle anchored to that person's start date, so a
+          single shared column header ("Used 2026") would be a lie for three
+          of the four types. */}
+      <div style={styles.card}>
+        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
+          <div style={styles.cardTitle}>Statutory balances</div>
+          <select
+            style={{ ...styles.smallInput, width: 200 }}
+            value={balanceEmployeeId}
+            onChange={(e) => setBalanceEmployeeId(e.target.value)}
+          >
+            <option value="">Choose employee…</option>
+            {employees.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.first_name} {e.last_name}
+              </option>
+            ))}
+          </select>
+        </div>
+        {!balanceEmployeeId ? (
+          <div style={{ fontSize: 12, color: colors.muted }}>
+            Pick an employee to see their BCEA balances.
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+              Cycles run from the employee's own start date. Sick leave is 30 days per{' '}
+              <strong>36 months</strong>, not per year — the cycle window is shown against each row.
+            </div>
+            <div style={styles.tableWrap}>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Leave type</th>
+                    <th style={styles.th}>Cycle</th>
+                    <th style={styles.th}>Entitled</th>
+                    <th style={styles.th}>Used</th>
+                    <th style={styles.th}>Remaining</th>
+                    <th style={styles.th}>Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {balancesForSelected.map((b) => (
+                    <tr key={b.leaveType}>
+                      <td style={styles.td}>{LEAVE_TYPE_LABELS[b.leaveType] || b.leaveType}</td>
+                      <td style={styles.td}>
+                        {b.cycleStart ? `${b.cycleStart} → ${b.cycleEnd}` : '—'}
+                      </td>
+                      <td style={styles.tdNum}>{b.hasBalance ? fmt(b.entitled, 0) : '—'}</td>
+                      <td style={styles.tdNum}>{fmt(b.used, 0)}</td>
+                      <td style={styles.tdNum}>
+                        {b.hasBalance ? (
+                          <strong style={{ color: b.remaining < 0 ? colors.danger : colors.cream }}>
+                            {fmt(b.remaining, 0)}
+                          </strong>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                      <td style={{ ...styles.td, fontSize: 11, color: colors.muted }}>
+                        {[
+                          b.note,
+                          !b.hasBalance ? b.reason : null,
+                          b.hasBalance && !b.eligible
+                            ? `Not yet eligible — needs ${b.minServiceMonths} months' service (has ${b.serviceMonths})`
+                            : null,
+                          b.lapses ? 'Lapses at cycle end — does not carry over' : null,
+                          !b.paid ? 'Unpaid by employer (UIF claim)' : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ') || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+
       <div style={styles.card}>
         <div style={styles.cardTitle}>Logged leave — {selectedYear}</div>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
@@ -2270,6 +2423,7 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
               <table style={styles.table}>
                 <thead>
                   <tr>
+                    <th style={styles.th}>Type</th>
                     <th style={styles.th}>From</th>
                     <th style={styles.th}>To</th>
                     <th style={styles.th}>Days used</th>
@@ -2280,6 +2434,10 @@ function LeaveTab({ companyId, employees, leave, onUpdateEmployee, onLeaveAdd, o
                 <tbody>
                   {group.entries.map((l) => (
                     <tr key={l.id}>
+                      {/* Rows written before leave_type existed were all
+                          annual leave, so a missing type reads as annual
+                          rather than "unknown". */}
+                      <td style={styles.td}>{LEAVE_TYPE_LABELS[l.leave_type || 'annual'] || l.leave_type}</td>
                       <td style={styles.td}>{l.start_date}</td>
                       <td style={styles.td}>{l.end_date}</td>
                       <td style={styles.tdNum}>{fmt(l.days_used, 0)}</td>

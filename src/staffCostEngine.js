@@ -223,14 +223,44 @@ export async function getBonusesByEmployee({ companyId }) {
 // annual figure, so this is only meaningful against the current leave cycle.
 // Kept simple deliberately: it mirrors what the Leave tab itself already shows
 // staff, so the two can't disagree.
+//
+// ANNUAL LEAVE ONLY (2026-09-03). This used to sum every hr_leave row, which
+// was correct while annual leave was the only kind. Now that sick, family
+// responsibility and maternity leave are logged in the same table, summing
+// them all would subtract sick days from the ANNUAL leave entitlement — so a
+// person off sick for two weeks would appear to have used up their holiday
+// and the leave-pay provision (a real liability if they resign) would be
+// understated by exactly that much. Taking sick leave does not reduce your
+// annual leave balance.
+//
+// Maternity is excluded for a second, independent reason: it is unpaid by
+// the employer and claimed from UIF, so it accrues no salary liability at
+// all. Rows written before leave_type existed were all annual, which is why
+// a missing type is read as 'annual' rather than skipped.
 export async function getLeaveDaysByEmployee({ companyId }) {
   const data = await sb.select('hr_leave', { company_id: companyId }, {})
   const used = {}
   for (const l of data || []) {
     if (!l.employee_id) continue
+    if ((l.leave_type || 'annual') !== 'annual') continue
     used[l.employee_id] = (used[l.employee_id] || 0) + Number(l.days_used || 0)
   }
   return used
+}
+
+// All types, per employee, for reporting rather than for the provision.
+// Sick-leave load in particular is worth seeing per person and per
+// department; it just must not touch the annual-leave liability above.
+export async function getLeaveDaysByEmployeeAndType({ companyId }) {
+  const data = await sb.select('hr_leave', { company_id: companyId }, {})
+  const byEmp = {}
+  for (const l of data || []) {
+    if (!l.employee_id) continue
+    const type = l.leave_type || 'annual'
+    if (!byEmp[l.employee_id]) byEmp[l.employee_id] = {}
+    byEmp[l.employee_id][type] = (byEmp[l.employee_id][type] || 0) + Number(l.days_used || 0)
+  }
+  return byEmp
 }
 
 export async function getRealStaffCostOverview({ companyId, employees, contracts, scheduleLocations, startDate, endDate }) {
