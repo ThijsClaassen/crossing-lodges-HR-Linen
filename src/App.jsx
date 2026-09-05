@@ -1213,7 +1213,7 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
     <>
       <div style={styles.card}>
         <div style={styles.cardTitle}>At a glance</div>
-        <div className="kpi-row">
+        <div style={{ ...styles.row, gap: 20 }}>
           <div>
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.goldLt }}>{employees.length}</div>
             <div style={{ fontSize: 11, color: colors.muted }}>Active employees</div>
@@ -1231,7 +1231,7 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
 
       <div style={styles.card}>
         <div style={styles.cardTitle}>Stock value</div>
-        <div className="kpi-row">
+        <div style={{ ...styles.row, gap: 20 }}>
           <div>
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.goldLt }}>R {fmt(uniformStockValue)}</div>
             <div style={{ fontSize: 11, color: colors.muted }}>Uniforms (company-wide)</div>
@@ -1258,7 +1258,7 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
           Uniforms: items marked broken and replaced this year. Linen: items logged as Lost or Damaged
           this year. Both valued at the item's price.
         </div>
-        <div className="kpi-row">
+        <div style={{ ...styles.row, gap: 20 }}>
           <div>
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.danger }}>
               {uniformWriteOffs.count} / R {fmt(uniformWriteOffs.value)}
