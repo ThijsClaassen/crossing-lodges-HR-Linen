@@ -1209,6 +1209,11 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
       .sort((a, b) => a.days - b.days)
   }, [role, contracts])
 
+  // Already run out vs still running. Kept as one sorted list above and split
+  // here so the ordering rule stays in one place.
+  const expired = useMemo(() => expiringSoon.filter((x) => x.days < 0), [expiringSoon])
+  const upcoming = useMemo(() => expiringSoon.filter((x) => x.days >= 0), [expiringSoon])
+
   return (
     <>
       <div style={styles.card}>
@@ -1276,7 +1281,16 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
 
       {role === 'hradmin' && (
         <div style={styles.card}>
-          <div style={styles.cardTitle}>Contracts expiring within 60 days</div>
+          {/* Grouped by urgency rather than listed flat. The old version put
+              a contract that ran out eight days ago on the same footing as
+              one with fifty-one days to run, which buries the only row that
+              needs doing something about today. expiringSoon is already
+              sorted ascending by days, so expired rows lead naturally. */}
+          <div style={styles.cardTitle}>
+            {expired.length > 0
+              ? `Contracts — ${expired.length} expired${upcoming.length ? `, ${upcoming.length} coming up` : ''}`
+              : `Contracts — ${upcoming.length} expiring within 60 days`}
+          </div>
           <div style={styles.tableWrap}>
           <table style={styles.table}>
             <thead>
@@ -1284,23 +1298,60 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
                 <th style={styles.th}>Employee</th>
                 <th style={styles.th}>Type</th>
                 <th style={styles.th}>End date</th>
-                <th style={styles.th}>Days left</th>
+                <th style={styles.th}>Status</th>
               </tr>
             </thead>
             <tbody>
-              {expiringSoon.map(({ contract, days }) => {
-                const emp = employees.find((e) => e.id === contract.employee_id)
-                return (
-                  <tr key={contract.id}>
-                    <td style={styles.td}>{emp ? `${emp.first_name} ${emp.last_name}` : 'Unknown'}</td>
-                    <td style={styles.td}>{contract.contract_type}</td>
-                    <td style={styles.td}>{contract.end_date}</td>
-                    <td style={styles.td}>
-                      <span style={styles.badge(days < 14 ? 'bad' : 'neutral')}>{days} days</span>
-                    </td>
-                  </tr>
-                )
-              })}
+              {[
+                { key: 'expired', label: 'Expired', rows: expired },
+                { key: 'upcoming', label: 'Coming up', rows: upcoming },
+              ]
+                .filter((g) => g.rows.length)
+                .map((g) => (
+                  <Fragment key={g.key}>
+                    {expired.length > 0 && upcoming.length > 0 && (
+                      <tr>
+                        <td
+                          colSpan={4}
+                          style={{
+                            ...styles.td,
+                            fontSize: 10,
+                            letterSpacing: '.1em',
+                            textTransform: 'uppercase',
+                            fontWeight: 700,
+                            color: g.key === 'expired' ? colors.danger : colors.muted,
+                          }}
+                        >
+                          {g.label} ({g.rows.length})
+                        </td>
+                      </tr>
+                    )}
+                    {g.rows.map(({ contract, days }) => {
+                      const emp = employees.find((e) => e.id === contract.employee_id)
+                      return (
+                        <tr key={contract.id}>
+                          <td style={styles.td}>{emp ? `${emp.first_name} ${emp.last_name}` : 'Unknown'}</td>
+                          <td style={styles.td}>{contract.contract_type}</td>
+                          <td style={styles.td}>{contract.end_date}</td>
+                          <td style={styles.td}>
+                            {/* Words, not a bare signed number. "-8 days" asks
+                                the reader to work out what the minus means;
+                                "expired 8 days ago" does not, and it still
+                                reads correctly in greyscale or to someone who
+                                can't separate the red from the grey. */}
+                            <span style={styles.badge(days < 0 ? 'bad' : 'neutral')}>
+                              {days < 0
+                                ? `expired ${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ago`
+                                : days === 0
+                                  ? 'expires today'
+                                  : `in ${days} day${days === 1 ? '' : 's'}`}
+                            </span>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </Fragment>
+                ))}
               {expiringSoon.length === 0 && (
                 <tr>
                   <td style={styles.td} colSpan={4}>
