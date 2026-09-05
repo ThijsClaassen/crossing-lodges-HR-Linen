@@ -24,6 +24,14 @@ export const colors = {
   // lodge colour can never be mistaken for a status or for the brand.
 
 
+  // Categorical chart colours. Series tokens rather than the accent, so a
+
+
+
+  // lodge colour can never be mistaken for a status or for the brand.
+
+
+
   loc: { ZC: 'var(--series-1)', EC: 'var(--series-2)', SC: 'var(--series-3)' },
 }
 
@@ -193,6 +201,42 @@ export const css = `
   --series-4: #7e22ce;
   --series-5: #1d4ed8;
   --series-6: #b04a2f;
+}
+
+/* ── Stat tiles ───────────────────────────────────────────────────────────
+   A row of headline numbers reads as one undifferentiated block when the
+   values just sit side by side — the eye has to work out where one metric
+   ends and the next begins. Giving each its own inset tile does that work
+   instead.
+
+   Note `.kpi-row > div`: the children are styled by POSITION rather than by
+   class. That means converting a stat row is a one-line change to the
+   wrapper, instead of adding a className to every number in seven apps —
+   far fewer edits, and none of them can be half-done. Ops and Maintenance
+   already use .kpi/.kpi-row markup, so they pick this up unchanged. */
+.kpi-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.kpi-row > div,
+.kpi {
+  flex: 1 1 auto;
+  min-width: 140px;
+  background: var(--surface-overlay);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+
+/* The tile sits on --surface-overlay, which on light is barely off-white and
+   would leave the tile invisible against a white card. A hairline restores
+   the edge without darkening the fill. */
+:root[data-theme='light'] .kpi-row > div,
+:root[data-theme='light'] .kpi {
+  border-color: var(--line);
 }
 /* THEME-TOKENS-END */
 
