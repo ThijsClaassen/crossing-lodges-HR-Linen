@@ -14,6 +14,7 @@
 // 'staff' | 'admin' | 'hradmin' role string from base role + isHrAdmin, so
 // none of the app's extensive role === 'hradmin' checks needed to change.
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
+import { applyTheme, resolveMode } from './branding.js'
 import { supabase } from './supabaseClient.js'
 import { setLocations } from './sb.js'
 
@@ -60,7 +61,7 @@ export function CompanyProvider({ children }) {
         { data: hrAdminRows, error: hrAdminErr },
         { data: appAccessRows, error: appAccessErr },
       ] = await Promise.all([
-        supabase.from('companies').select('id, slug, name, status').order('name'),
+        supabase.from('companies').select('id, slug, name, status, theme_accent, theme_mode').order('name'),
         supabase.from('user_companies').select('company_id, role').eq('user_id', user.id),
         supabase.from('platform_admins').select('user_id').eq('user_id', user.id).maybeSingle(),
         supabase.from('hr_admins').select('company_id').eq('user_id', user.id),
@@ -88,6 +89,10 @@ export function CompanyProvider({ children }) {
           slug: c.slug,
           name: c.name,
           status: c.status,
+          // White-label branding: one accent, one default mode. Null accent
+          // means "use the product default".
+          themeAccent: c.theme_accent || null,
+          themeMode: c.theme_mode || 'light',
           role: roleByCompany[c.id] || (isPlatformAdmin ? 'admin' : null),
           isHrAdmin: isPlatformAdmin || hrAdminCompanyIds.has(c.id),
         }))
@@ -161,6 +166,16 @@ export function CompanyProvider({ children }) {
   }, [])
 
   const current = availableCompanies.find((c) => c.id === companyId) || null
+
+  // Re-apply branding when the selected company changes, so switching
+  // companies reskins immediately instead of after a reload. Keyed on the
+  // two values that matter rather than on `current`, which is a new object
+  // every render and would loop.
+  useEffect(() => {
+    if (!current) return
+    applyTheme({ accent: current.themeAccent, companyDefaultMode: current.themeMode })
+  }, [current?.themeAccent, current?.themeMode])
+
   const value = {
     // Gate on lodges too — see locationsReady above.
     loading: loading || !locationsReady,
