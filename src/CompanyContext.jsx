@@ -14,6 +14,7 @@
 // 'staff' | 'admin' | 'hradmin' role string from base role + isHrAdmin, so
 // none of the app's extensive role === 'hradmin' checks needed to change.
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
+import { applyTheme } from './branding.js'
 import { supabase } from './supabaseClient.js'
 import { setLocations } from './sb.js'
 
@@ -82,12 +83,42 @@ export function CompanyProvider({ children }) {
         appAccessByCompany[row.company_id].add(row.app_key)
       }
 
+      // Branding is fetched SEPARATELY and its failure is ignored on purpose.
+      //
+      // This is the line that took HR down on 2026-09-05. The theme columns
+      // were added straight into the main companies select above; they arrive
+      // with add_company_theming.sql, and until that migration has run
+      // PostgREST answers an unknown column with a hard 400, not a null. That
+      // set compErr, which threw, and the entire app failed to load — over an
+      // accent colour.
+      //
+      // Note there is no try/catch here, deliberately: supabase-js RESOLVES
+      // with { data, error } rather than rejecting, so a catch block would
+      // never fire and would only look like protection. The real safeguard is
+      // that themeErr is read and discarded, leaving themeRows null, which
+      // falls through to the product default — exactly what "no accent
+      // configured" already means.
+      let themeByCompany = {}
+      const { data: themeRows, error: themeErr } = await supabase
+        .from('companies')
+        .select('id, theme_accent, theme_mode')
+      if (!themeErr) {
+        for (const t of themeRows || []) {
+          themeByCompany[t.id] = { accent: t.theme_accent || null, mode: t.theme_mode || 'light' }
+        }
+      }
+
       const available = (companies || [])
         .map((c) => ({
           id: c.id,
           slug: c.slug,
           name: c.name,
           status: c.status,
+          // Null accent means "use the product default" — which is also what
+          // a brand-new company gets before anyone brands it, and what every
+          // company gets if the migration above hasn't run yet.
+          themeAccent: themeByCompany[c.id]?.accent ?? null,
+          themeMode: themeByCompany[c.id]?.mode ?? 'light',
           role: roleByCompany[c.id] || (isPlatformAdmin ? 'admin' : null),
           isHrAdmin: isPlatformAdmin || hrAdminCompanyIds.has(c.id),
         }))
@@ -161,6 +192,15 @@ export function CompanyProvider({ children }) {
   }, [])
 
   const current = availableCompanies.find((c) => c.id === companyId) || null
+
+  // Re-apply branding when the selected company changes, so switching
+  // companies reskins immediately rather than after a reload. Keyed on the
+  // two values that matter, not on `current` — that is a fresh object every
+  // render and would loop.
+  useEffect(() => {
+    if (!current) return
+    applyTheme({ accent: current.themeAccent, companyDefaultMode: current.themeMode })
+  }, [current?.themeAccent, current?.themeMode])
   const value = {
     // Gate on lodges too — see locationsReady above.
     loading: loading || !locationsReady,
