@@ -13,6 +13,8 @@ import {
   fmtDateOnly,
   addDays,
   WEEKDAY_NAMES,
+  rosteredOffByEmployee,
+  rosteredDayIsRedundant,
 } from './shiftPatterns.js'
 import { colors, fonts, css } from './theme.js'
 import { supabase } from './supabaseClient.js'
@@ -84,8 +86,13 @@ function startOfWeek(date, weekStartDay = 1) {
 // applies is a property of the person now. An employee with no pattern falls
 // back to the legacy 21/7 rotation, so this returns exactly what it used to
 // for anyone not yet migrated.
-function cycleStatusForDate(employee, patternsById, date) {
-  return statusForDate(patternFor(employee, patternsById), employee?.cycle_anchor_date, date)
+function cycleStatusForDate(employee, patternsById, date, rosterByEmployee = null) {
+  return statusForDate(
+    patternFor(employee, patternsById),
+    employee?.cycle_anchor_date,
+    date,
+    rosterByEmployee?.[employee?.id] || null,
+  )
 }
 
 // How many days in [startStr, endStr] inclusive fall on a day this employee
@@ -96,12 +103,13 @@ function cycleStatusForDate(employee, patternsById, date) {
 // changing somebody's pattern later does NOT retroactively rewrite what their
 // past leave cost. That is deliberate — a balance that moves under you is
 // worse than one that is slightly out of date.
-function countWorkingDaysInRange(employee, patternsById, startStr, endStr) {
+function countWorkingDaysInRange(employee, patternsById, startStr, endStr, rosterByEmployee = null) {
   return workingDaysInRange(
     patternFor(employee, patternsById),
     employee?.cycle_anchor_date,
     startStr,
     endStr,
+    rosterByEmployee?.[employee?.id] || null,
   )
 }
 
@@ -566,6 +574,16 @@ function AuthenticatedApp() {
   const [weekStartDay, setWeekStartDay] = useState(1)
   const [staffingRatios, setStaffingRatios] = useState([])
   const [shiftPatterns, setShiftPatterns] = useState([])
+  const [rosteredOffDays, setRosteredOffDays] = useState([])
+
+  function addLocalOffDay(row) {
+    if (!row) return
+    setRosteredOffDays((prev) => (prev.some((r) => r.id === row.id) ? prev : [...prev, row]))
+  }
+
+  function removeLocalOffDay(id) {
+    setRosteredOffDays((prev) => prev.filter((r) => r.id !== id))
+  }
 
   async function loadAll() {
     setLoading(true)
@@ -644,6 +662,15 @@ function AuthenticatedApp() {
         .select('hr_shift_patterns', { company_id: companyId, active: true }, { order: 'name.asc' })
         .catch(() => [])
       setShiftPatterns(patternsRes || [])
+
+      // Rostered extra days off (#458). Same .catch for the same reason: a
+      // company that has not run add_hr_rostered_off_days.sql yet still loads,
+      // with nobody having any extra days — which is exactly right, because
+      // nobody does until somebody rosters them.
+      const offDaysRes = await sb
+        .select('hr_employee_off_days', { company_id: companyId }, { order: 'off_date.asc' })
+        .catch(() => [])
+      setRosteredOffDays(offDaysRes || [])
       setContracts(conRes || [])
       setLoans(loanRes || [])
       setBonuses(bonusRes || [])
@@ -957,6 +984,7 @@ function AuthenticatedApp() {
                 companyId={companyId}
                 employees={employees}
                 shiftPatterns={shiftPatterns}
+                rosteredOffDays={rosteredOffDays}
                 scheduleLocations={scheduleLocations}
                 leave={leave}
                 onAdd={addLocalEmployee}
@@ -970,6 +998,9 @@ function AuthenticatedApp() {
                 companyId={companyId}
                 employees={employees}
                 shiftPatterns={shiftPatterns}
+                rosteredOffDays={rosteredOffDays}
+                onOffDayAdd={addLocalOffDay}
+                onOffDayRemove={removeLocalOffDay}
                 scheduleLocations={scheduleLocations}
                 leave={leave}
                 weekStartDay={weekStartDay}
@@ -986,6 +1017,7 @@ function AuthenticatedApp() {
                 companyId={companyId}
                 employees={employees}
                 shiftPatterns={shiftPatterns}
+                rosteredOffDays={rosteredOffDays}
                 leave={leave}
                 entitlements={leaveEntitlements}
                 onUpdateEmployee={updateLocalEmployee}
@@ -1497,6 +1529,9 @@ function ScheduleTab({
   companyId,
   employees,
   shiftPatterns,
+  rosteredOffDays,
+  onOffDayAdd,
+  onOffDayRemove,
   scheduleLocations,
   leave,
   weekStartDay,
@@ -1550,9 +1585,14 @@ function ScheduleTab({
     return m
   }, [shiftPatterns])
 
+  // Rostered extra days, grouped once per render. The schedule grid asks about
+  // every employee on every visible day, so filtering the flat list per cell
+  // would be a full scan of the table thousands of times per render.
+  const rosterByEmployee = useMemo(() => rosteredOffByEmployee(rosteredOffDays || []), [rosteredOffDays])
+
   function dayInfo(employee, date) {
     if (leaveOnDate(leave, employee.id, date)) return { status: 'leave' }
-    return cycleStatusForDate(employee, patternsById, date)
+    return cycleStatusForDate(employee, patternsById, date, rosterByEmployee)
   }
 
   function positionOf(employee) {
@@ -1562,6 +1602,34 @@ function ScheduleTab({
   async function saveAnchor(employeeId, value) {
     const [row] = await sb.update('hr_employees', { id: employeeId }, { cycle_anchor_date: value || null })
     onUpdateEmployee(row)
+  }
+
+  // Rostered extra days (#458). Kept as its own card rather than folded into
+  // the pattern table: a pattern is a rule set once, a roster is a decision
+  // made every month, and putting a month picker inside a settings table
+  // makes the settings look like they change monthly too.
+  const [rosterEmployeeId, setRosterEmployeeId] = useState('')
+  const [rosterMonth, setRosterMonth] = useState(() => todayStr().slice(0, 7))
+  const [rosterBusy, setRosterBusy] = useState(false)
+
+  async function toggleRosteredDay(employeeId, dateStr, existingId) {
+    if (!employeeId || rosterBusy) return
+    setRosterBusy(true)
+    try {
+      if (existingId) {
+        await sb.remove('hr_employee_off_days', { id: existingId })
+        onOffDayRemove(existingId)
+      } else {
+        const [row] = await sb.insert('hr_employee_off_days', {
+          company_id: companyId,
+          employee_id: employeeId,
+          off_date: dateStr,
+        })
+        onOffDayAdd(row)
+      }
+    } finally {
+      setRosterBusy(false)
+    }
   }
 
   async function savePattern(employeeId, value) {
@@ -2173,6 +2241,115 @@ function ScheduleTab({
           </table>
         </div>
       </CollapsibleCard>
+
+      <CollapsibleCard title="Rostered extra days off">
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Days given off on top of whatever the person&rsquo;s pattern already says — the three a
+          month your local staff get beyond their Sundays. Pick a person and a month, then click
+          the days. Saved as you click.
+        </div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          These only ever <strong>take days away</strong>. Clicking a day the pattern already has
+          off changes nothing, and is marked as such rather than quietly accepted — a day given
+          on an existing off day is a day the person loses without noticing.
+        </div>
+
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+          <select
+            style={styles.smallInput}
+            value={rosterEmployeeId}
+            onChange={(e) => setRosterEmployeeId(e.target.value)}
+          >
+            <option value="">Choose an employee…</option>
+            {employees.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.first_name} {e.last_name}
+              </option>
+            ))}
+          </select>
+          <input
+            type="month"
+            style={styles.smallInput}
+            value={rosterMonth}
+            onChange={(e) => setRosterMonth(e.target.value)}
+          />
+        </div>
+
+        {!rosterEmployeeId && (
+          <div style={{ fontSize: 12, color: colors.muted }}>Choose an employee to set their days.</div>
+        )}
+
+        {rosterEmployeeId && (() => {
+          const emp = employees.find((e) => e.id === rosterEmployeeId)
+          const pattern = patternFor(emp, patternsById)
+          const [yy, mm] = rosterMonth.split('-').map(Number)
+          if (!yy || !mm) return null
+          const daysInMonth = new Date(yy, mm, 0).getDate()
+          const rowsForEmp = (rosteredOffDays || []).filter((r) => r.employee_id === rosterEmployeeId)
+          const byDate = {}
+          for (const r of rowsForEmp) byDate[String(r.off_date).slice(0, 10)] = r
+          const inMonth = rowsForEmp.filter((r) => String(r.off_date).slice(0, 7) === rosterMonth)
+
+          return (
+            <>
+              <div style={{ fontSize: 12, marginBottom: 8 }}>
+                <strong>{inMonth.length}</strong> extra day{inMonth.length === 1 ? '' : 's'} set for{' '}
+                {rosterMonth}
+                {inMonth.length !== 3 && (
+                  <span style={{ color: colors.muted }}> — the usual allowance is three</span>
+                )}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {Array.from({ length: daysInMonth }, (_, i) => {
+                  const day = i + 1
+                  const dateStr = `${rosterMonth}-${String(day).padStart(2, '0')}`
+                  const dateObj = parseDateOnly(dateStr)
+                  const existing = byDate[dateStr]
+                  const alreadyOff = rosteredDayIsRedundant(pattern, emp?.cycle_anchor_date, dateObj)
+                  const weekday = WEEKDAY_NAMES[dateObj.getDay()].slice(0, 2)
+                  return (
+                    <button
+                      key={dateStr}
+                      type="button"
+                      disabled={rosterBusy}
+                      onClick={() => toggleRosteredDay(rosterEmployeeId, dateStr, existing?.id)}
+                      title={
+                        alreadyOff
+                          ? 'Already off under this pattern — giving this day changes nothing'
+                          : existing
+                            ? 'Rostered off — click to remove'
+                            : 'Click to give this day off'
+                      }
+                      style={{
+                        width: 46,
+                        padding: '6px 0',
+                        borderRadius: 6,
+                        cursor: rosterBusy ? 'wait' : 'pointer',
+                        fontSize: 11,
+                        lineHeight: 1.3,
+                        border: `1px solid ${existing ? colors.gold || colors.cream : colors.border}`,
+                        // Three states, and the text says which — colour alone
+                        // would leave "already off" and "rostered" looking
+                        // similar on a projector.
+                        background: existing
+                          ? colors.gold || colors.border
+                          : alreadyOff
+                            ? colors.border
+                            : 'transparent',
+                        color: existing ? colors.panel : colors.cream,
+                        opacity: alreadyOff && !existing ? 0.5 : 1,
+                      }}
+                    >
+                      <div style={{ fontWeight: 600 }}>{day}</div>
+                      <div style={{ fontSize: 9 }}>{alreadyOff && !existing ? 'off' : weekday}</div>
+                    </button>
+                  )
+                })}
+              </div>
+            </>
+          )
+        })()}
+      </CollapsibleCard>
     </>
   )
 }
@@ -2186,7 +2363,7 @@ function ScheduleTab({
 // nothing, since it wasn't going to be worked anyway.
 // ---------------------------------------------------------------------------
 
-function LeaveTab({ companyId, employees, shiftPatterns, leave, entitlements, onUpdateEmployee, onLeaveAdd, onLeaveRemove }) {
+function LeaveTab({ companyId, employees, shiftPatterns, rosteredOffDays, leave, entitlements, onUpdateEmployee, onLeaveAdd, onLeaveRemove }) {
   const [leaveForm, setLeaveForm] = useState({
     employee_id: '',
     leave_type: 'annual',
@@ -2263,6 +2440,11 @@ function LeaveTab({ companyId, employees, shiftPatterns, leave, entitlements, on
     return m
   }, [shiftPatterns])
 
+  // Rostered extra days, grouped once per render. The schedule grid asks about
+  // every employee on every visible day, so filtering the flat list per cell
+  // would be a full scan of the table thousands of times per render.
+  const rosterByEmployee = useMemo(() => rosteredOffByEmployee(rosteredOffDays || []), [rosteredOffDays])
+
   // BCEA balances for the employee selected in the Statutory balances card.
   // countWorkingDaysInRange is passed through rather than re-implemented in
   // leaveEngine, so the 21-on/7-off rotation logic exists in exactly one
@@ -2280,7 +2462,8 @@ function LeaveTab({ companyId, employees, shiftPatterns, leave, entitlements, on
       // Adapted rather than passed raw: leaveEngine hands this the EMPLOYEE
       // now, not just an anchor date, because which pattern applies is a
       // property of the person.
-      workingDaysBetween: (employee, start, end) => countWorkingDaysInRange(employee, patternsById, start, end),
+      workingDaysBetween: (employee, start, end) =>
+        countWorkingDaysInRange(employee, patternsById, start, end, rosterByEmployee),
     })
   }, [balanceEmployeeId, employeeById, entitlements, leave])
 
@@ -2294,7 +2477,7 @@ function LeaveTab({ companyId, employees, shiftPatterns, leave, entitlements, on
     if (leaveForm.end_date < leaveForm.start_date) return
     setLogging(true)
     const emp = employeeById[leaveForm.employee_id]
-    const daysUsed = countWorkingDaysInRange(emp, patternsById, leaveForm.start_date, leaveForm.end_date)
+    const daysUsed = countWorkingDaysInRange(emp, patternsById, leaveForm.start_date, leaveForm.end_date, rosterByEmployee)
     const [row] = await sb.insert('hr_leave', {
       company_id: companyId,
       employee_id: leaveForm.employee_id,
@@ -2608,7 +2791,7 @@ function LeaveTab({ companyId, employees, shiftPatterns, leave, entitlements, on
 // Employees tab — Admin/HR Admin: master list, one lodge at a time.
 // ---------------------------------------------------------------------------
 
-function EmployeesTab({ companyId, employees, shiftPatterns, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee }) {
+function EmployeesTab({ companyId, employees, shiftPatterns, rosteredOffDays, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee }) {
   const today = parseDateOnly(todayStr())
 
   // hr_schedule_locations.week_start_date is always Monday-anchored no
@@ -2633,9 +2816,14 @@ function EmployeesTab({ companyId, employees, shiftPatterns, scheduleLocations, 
     return m
   }, [shiftPatterns])
 
+  // Rostered extra days, grouped once per render. The schedule grid asks about
+  // every employee on every visible day, so filtering the flat list per cell
+  // would be a full scan of the table thousands of times per render.
+  const rosterByEmployee = useMemo(() => rosteredOffByEmployee(rosteredOffDays || []), [rosteredOffDays])
+
   function todayInfo(employee) {
     if (leaveOnDate(leave, employee.id, today)) return { status: 'leave' }
-    return cycleStatusForDate(employee, patternsById, today)
+    return cycleStatusForDate(employee, patternsById, today, rosterByEmployee)
   }
 
   const [form, setForm] = useState({

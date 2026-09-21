@@ -159,6 +159,82 @@ check(
 )
 check('it imports them instead', /parseDateOnly,\n\s*fmtDateOnly,/.test(APP))
 
+// --- 8. ROSTERED EXTRA DAYS (#458) ---------------------------------------
+//
+// Same risk as the patterns themselves, one layer up: the roster is honoured
+// in the grid but not in the leave count, so a rostered day shows as off on
+// screen and is still charged against the person's balance. Nothing on either
+// screen contradicts the other.
+{
+  const calls = []
+  traverse(ast, {
+    CallExpression: (p) => {
+      const callee = p.node.callee
+      if (callee.type !== 'Identifier') return
+      if (!['cycleStatusForDate', 'countWorkingDaysInRange'].includes(callee.name)) return
+      calls.push({
+        name: callee.name,
+        args: p.node.arguments.map((a) => (a.type === 'Identifier' ? a.name : a.type)),
+        line: p.node.loc?.start.line,
+      })
+    },
+  })
+
+  const withoutRoster = calls.filter((c) => !c.args.includes('rosterByEmployee'))
+  check(
+    'EVERY status and leave call passes the roster',
+    withoutRoster.length === 0,
+    withoutRoster.map((c) => `${c.name} at line ${c.line}`).join(', ') +
+      ' — a call without it shows a rostered day as off in one place and charges it in another',
+  )
+
+  // Counted, not merely found. Three components hold a rosterByEmployee memo
+  // and the first version of this matched any ONE of them — so gutting a
+  // single component's memo passed on the strength of the other two.
+  const memoCount = (APP.match(/rosterByEmployee = useMemo/g) || []).length
+  const groupedCount = (APP.match(/rosteredOffByEmployee\(rosteredOffDays/g) || []).length
+  check(
+    'every rosterByEmployee memo actually groups the rows',
+    memoCount > 0 && memoCount === groupedCount,
+    `${memoCount} memo(s) but ${groupedCount} grouping call(s) — one of them is returning something else`,
+  )
+  check('the app fetches the rostered days', /'hr_employee_off_days'/.test(APP))
+  check(
+    'and survives the table not existing yet',
+    /hr_employee_off_days[\s\S]{0,200}?\.catch\(\(\) => \[\]\)/.test(APP),
+  )
+}
+
+// The picker itself.
+check('there is a month picker for the roster', /type="month"/.test(APP))
+// CALLED, not merely imported. The first version of this matched the import
+// statement, so replacing the actual call with `false` passed — the same
+// mistake as the memo above, and the third time this shape of assertion has
+// let a mutation through in this project.
+{
+  let called = false
+  traverse(ast, {
+    CallExpression: (p) => {
+      if (p.node.callee.type === 'Identifier' && p.node.callee.name === 'rosteredDayIsRedundant') {
+        called = true
+      }
+    },
+  })
+  check(
+    'a day that is already off is marked rather than silently accepted',
+    called && /changes nothing/.test(APP),
+    'a day given on an existing off day is a day the person loses without noticing',
+  )
+}
+check(
+  'the card says how many days are set against the expected three',
+  /the usual allowance is three/.test(APP),
+)
+check(
+  'the roster only ever takes days away, and the page says so',
+  /take days away/.test(APP),
+)
+
 console.log(`\n${passed} passed, ${failures.length} failed`)
 if (failures.length) {
   failures.forEach((f) => console.log(`  FAIL: ${f}`))

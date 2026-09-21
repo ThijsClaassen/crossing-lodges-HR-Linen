@@ -82,14 +82,33 @@ export function patternFor(employee, patternsById = {}) {
   return LEGACY_ROTATION
 }
 
-// { status: 'on' | 'off' | 'none', blockStart? } for one day.
+// { status: 'on' | 'off' | 'none', blockStart?, reason? } for one day.
 //
 // blockStart is only set for a rotation, and only when on duty: it is the date
 // the current working block began, which the schedule grid uses to label a
 // stretch. Lodge assignment is keyed by calendar week, not by block, so
 // nothing depends on a fixed_week pattern producing one.
-export function statusForDate(pattern, anchorISO, date) {
+//
+// ROSTERED DAYS (#458). `extraOffDates` is a Set of 'YYYY-MM-DD' strings — days
+// somebody has been given off on top of whatever their pattern says. Local
+// staff at Crossing Lodges are off every Sunday PLUS three days a month that
+// are picked per person, per month, and those three cannot come from a pattern
+// because they are a decision, not a rule.
+//
+// A rostered day can only ever turn a working day INTO an off day. It cannot
+// make an off day into a working one — that would be a roster silently
+// cancelling somebody's Sunday.
+export function statusForDate(pattern, anchorISO, date, extraOffDates = null) {
   const p = pattern || LEGACY_ROTATION
+
+  // Checked first, and it short-circuits: a rostered day is off whatever the
+  // pattern would have said, including for a rotation with no anchor, where
+  // the pattern itself cannot answer at all. `reason` lets the grid show it
+  // as a rostered day rather than as an ordinary one — the difference matters
+  // when somebody is checking whether this month's three were given.
+  if (extraOffDates && extraOffDates.has(fmtDateOnly(date))) {
+    return { status: 'off', reason: 'rostered' }
+  }
 
   if (p.kind === 'fixed_week') {
     const daysOff = Array.isArray(p.days_off) ? p.days_off : []
@@ -130,7 +149,7 @@ export function statusForDate(pattern, anchorISO, date) {
 // This is what decides how much leave a request costs: days that were already
 // off cost nothing. Getting it wrong does not look wrong — it shows up months
 // later as a balance that does not reconcile.
-export function workingDaysInRange(pattern, anchorISO, startISO, endISO) {
+export function workingDaysInRange(pattern, anchorISO, startISO, endISO, extraOffDates = null) {
   if (!startISO || !endISO) return 0
   const p = pattern || LEGACY_ROTATION
   // A rotation with no anchor has no knowable status, so no day in the range
@@ -145,10 +164,37 @@ export function workingDaysInRange(pattern, anchorISO, startISO, endISO) {
   // engine and from tests.
   let guard = 0
   while (d <= end && guard++ < 4000) {
-    if (statusForDate(p, anchorISO, d).status === 'on') count++
+    // The roster is honoured here too, and it has to be: leave taken across a
+    // rostered day off must not charge that day. Counting it would take a day
+    // of leave for a day the person was never going to work — the same error
+    // the off-cycle rule exists to prevent, on a different axis.
+    if (statusForDate(p, anchorISO, d, extraOffDates).status === 'on') count++
     d = addDays(d, 1)
   }
   return count
+}
+
+// Rows from hr_employee_off_days -> { [employeeId]: Set of 'YYYY-MM-DD' }.
+//
+// Built once per render rather than filtered per day: the schedule grid asks
+// about every employee on every visible day, so a linear scan per cell turns
+// a 20-employee six-week grid into 16,800 scans of the whole table.
+export function rosteredOffByEmployee(rows = []) {
+  const map = {}
+  for (const r of rows) {
+    if (!r?.employee_id || !r?.off_date) continue
+    const key = String(r.off_date).slice(0, 10)
+    if (!map[r.employee_id]) map[r.employee_id] = new Set()
+    map[r.employee_id].add(key)
+  }
+  return map
+}
+
+// Would this rostered day actually change anything? A day given off that the
+// pattern already has off is not a day off — it is a day the person loses
+// without noticing, and the UI should say so rather than accept it silently.
+export function rosteredDayIsRedundant(pattern, anchorISO, date) {
+  return statusForDate(pattern, anchorISO, date).status === 'off'
 }
 
 // One line describing a pattern, for a dropdown or a column. Written so the

@@ -221,6 +221,147 @@ eq('no pattern describes the legacy one', P.describePattern(null), '21 on / 7 of
   eq('and goes backwards', P.fmtDateOnly(P.addDays(parsed, -21)), '2026-08-31')
 }
 
+// ---------------------------------------------------------------------------
+// 9. ROSTERED EXTRA DAYS (#458). Local staff are off every Sunday PLUS three
+// days a month that somebody picks. Those three are a decision, not a rule,
+// so they sit on top of the pattern rather than inside it.
+{
+  const sundaysOff = { kind: 'fixed_week', days_off: [0] }
+  // 2026-09-21 is a Monday, 2026-09-20 a Sunday.
+  const roster = new Set(['2026-09-23', '2026-09-24'])
+
+  eq(
+    'a rostered day turns a working day off',
+    P.statusForDate(sundaysOff, null, d('2026-09-23'), roster).status,
+    'off',
+  )
+  eq(
+    'and says it came from the roster',
+    P.statusForDate(sundaysOff, null, d('2026-09-23'), roster).reason,
+    'rostered',
+  )
+  eq(
+    'a day not on the roster is unaffected',
+    P.statusForDate(sundaysOff, null, d('2026-09-22'), roster).status,
+    'on',
+  )
+  eq(
+    'the weekly day off still applies',
+    P.statusForDate(sundaysOff, null, d('2026-09-20'), roster).status,
+    'off',
+  )
+  eq(
+    'and an ordinary off day is NOT labelled as rostered',
+    P.statusForDate(sundaysOff, null, d('2026-09-20'), roster).reason,
+    undefined,
+  )
+
+  // Omitting the roster entirely must behave exactly as before it existed —
+  // every call site that has not been updated keeps working.
+  eq(
+    'no roster argument means no change',
+    P.statusForDate(sundaysOff, null, d('2026-09-23')).status,
+    'on',
+  )
+}
+
+// A roster can only take days away, never give them back.
+{
+  const sundaysOff = { kind: 'fixed_week', days_off: [0] }
+  const roster = new Set(['2026-09-20']) // a Sunday, already off
+  eq(
+    'rostering an already-off day leaves it off',
+    P.statusForDate(sundaysOff, null, d('2026-09-20'), roster).status,
+    'off',
+  )
+  check(
+    'and the UI can warn that the day was wasted',
+    P.rosteredDayIsRedundant(sundaysOff, null, d('2026-09-20')) === true,
+    'a day given off that was already off is a day the person loses without noticing',
+  )
+  check(
+    'while a real working day is not flagged',
+    P.rosteredDayIsRedundant(sundaysOff, null, d('2026-09-23')) === false,
+  )
+}
+
+// It works on a rotation too, including one with no anchor — where the
+// pattern itself cannot answer but a rostered day still can.
+{
+  const roster = new Set(['2026-09-10'])
+  eq(
+    'a rostered day off inside a working block',
+    P.statusForDate(null, '2026-09-01', d('2026-09-10'), roster).status,
+    'off',
+  )
+  eq(
+    'and it answers even when the rotation cannot',
+    P.statusForDate(P.LEGACY_ROTATION, null, d('2026-09-10'), roster).status,
+    'off',
+    'a rostered day is a fact about that date, not a calculation from an anchor',
+  )
+  // The mirror of the fixed-week assertion above, on the ROTATION path. The
+  // first version of this test only checked the fixed-week branch, so
+  // labelling every rotation off day as rostered passed — the two branches
+  // need the same assertion, not one between them.
+  eq(
+    "a rotation's own off day is not labelled rostered",
+    P.statusForDate(null, '2026-09-01', d('2026-09-25'), roster).reason,
+    undefined,
+    'otherwise every off day in a 21/7 cycle claims somebody chose it, and the three real ones become impossible to find',
+  )
+  eq(
+    'nor is a working day',
+    P.statusForDate(null, '2026-09-01', d('2026-09-10')).reason,
+    undefined,
+  )
+}
+
+// LEAVE. A request spanning a rostered day must not charge it — the same
+// rule as an off-cycle day, on a different axis.
+{
+  const sundaysOff = { kind: 'fixed_week', days_off: [0] }
+  const roster = new Set(['2026-09-23'])
+  eq(
+    'without the roster, a Mon-Fri week costs five days',
+    P.workingDaysInRange(sundaysOff, null, '2026-09-21', '2026-09-25'),
+    5,
+  )
+  eq(
+    'with one rostered day in it, four',
+    P.workingDaysInRange(sundaysOff, null, '2026-09-21', '2026-09-25', roster),
+    4,
+  )
+  eq(
+    'a fortnight with Sundays and three rostered days costs nine',
+    P.workingDaysInRange(
+      sundaysOff,
+      null,
+      '2026-09-14',
+      '2026-09-27',
+      new Set(['2026-09-16', '2026-09-23', '2026-09-25']),
+    ),
+    9,
+    '14 days minus 2 Sundays minus 3 rostered = 9',
+  )
+}
+
+// Grouping rows by employee.
+{
+  const map = P.rosteredOffByEmployee([
+    { employee_id: 'a', off_date: '2026-09-23' },
+    { employee_id: 'a', off_date: '2026-09-24' },
+    { employee_id: 'b', off_date: '2026-09-23' },
+    { employee_id: null, off_date: '2026-09-23' },
+    { employee_id: 'c', off_date: null },
+  ])
+  eq('two employees have rostered days', Object.keys(map).length, 2)
+  eq('and the right number each', map.a.size, 2)
+  check('rows with no employee are dropped', !map[null] && !map.undefined)
+  check('and rows with no date', !map.c)
+  check('timestamps are trimmed to a date', P.rosteredOffByEmployee([{ employee_id: 'a', off_date: '2026-09-23T00:00:00Z' }]).a.has('2026-09-23'))
+}
+
 console.log(`\n${passed} passed, ${failures.length} failed`)
 if (failures.length) {
   failures.forEach((f) => console.log(`  FAIL: ${f}`))
