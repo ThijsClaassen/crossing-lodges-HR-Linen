@@ -180,7 +180,9 @@ export function leaveBalance({
   let cappedNote = null
 
   if (leaveType === 'sick' && typeof workingDaysBetween === 'function') {
-    const worked = workingDaysBetween(employee?.cycle_anchor_date, startDate, asOfISO)
+    // The EMPLOYEE, not their anchor date: which working pattern applies is a
+    // property of the person now (#453), and the caller resolves it.
+    const worked = workingDaysBetween(employee, startDate, asOfISO)
     const cap = firstSixMonthsSickCap(startDate, asOfISO, worked)
     if (cap != null && cap < entitled) {
       entitled = cap

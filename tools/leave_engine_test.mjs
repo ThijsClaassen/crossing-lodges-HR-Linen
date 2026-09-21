@@ -113,6 +113,33 @@ const emp = { id: 'e1', start_date: '2023-04-01', cycle_anchor_date: null, annua
   check('a new starter is capped below the full 30', b.entitled === 1, `got ${b.entitled}`)
   check('and the reason is stated rather than silent', typeof b.note === 'string' && b.note.includes('26'))
 
+  // WHAT THE INJECTED FUNCTION IS HANDED (#453). It used to receive the
+  // employee's anchor DATE; it now receives the EMPLOYEE, because which
+  // working pattern applies is a property of the person and an anchor date
+  // alone cannot express it. Stubbing this with a constant — as the test
+  // above does — cannot see that change, so it is asserted directly: a
+  // regression here would silently charge fixed-week staff as though they
+  // were on the 21/7 rotation.
+  {
+    let received = 'never called'
+    leaveBalance({
+      employee: newStarter,
+      leaveType: 'sick',
+      entitlement: ENT.sick,
+      leaveRows: [],
+      asOf: '2026-09-03',
+      workingDaysBetween: (first) => {
+        received = first
+        return 46
+      },
+    })
+    check(
+      'the working-day function is handed the employee, not an anchor date',
+      received && typeof received === 'object' && received.id === 'e2',
+      `got ${JSON.stringify(received)}`,
+    )
+  }
+
   // Without an injected working-day function the cap cannot be applied —
   // must fall back to the full entitlement rather than silently zero.
   const noFn = leaveBalance({ employee: newStarter, leaveType: 'sick', entitlement: ENT.sick, leaveRows: [], asOf: '2026-09-03' })

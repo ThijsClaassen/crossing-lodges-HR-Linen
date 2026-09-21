@@ -3,6 +3,17 @@ import { sb, LOCATIONS, UNIFORM_CATEGORIES, LINEN_CATEGORIES, MOVEMENT_REASONS, 
 import { getRealStaffCostOverview } from './staffCostEngine.js'
 import { allBalances, entitlementForEmployee, LEAVE_TYPE_LABELS } from './leaveEngine.js'
 import { guestsByLodgeAndDate, requiredCountFor } from './staffingCoverageEngine.js'
+import {
+  patternFor,
+  statusForDate,
+  workingDaysInRange,
+  describePattern,
+  missingSetup,
+  parseDateOnly,
+  fmtDateOnly,
+  addDays,
+  WEEKDAY_NAMES,
+} from './shiftPatterns.js'
 import { colors, fonts, css } from './theme.js'
 import { supabase } from './supabaseClient.js'
 import Login from './Login.jsx'
@@ -48,59 +59,50 @@ function currentContract(employeeId, contracts) {
 // the schedule grid only groups days into weeks for display.
 // ---------------------------------------------------------------------------
 
-const CYCLE_ON_DAYS = 21
-const CYCLE_OFF_DAYS = 7
-const CYCLE_LENGTH = CYCLE_ON_DAYS + CYCLE_OFF_DAYS // 28
-
-// 'YYYY-MM-DD' -> local-midnight Date, avoiding the UTC-parsing footgun of
-// `new Date('YYYY-MM-DD')` (which lands on the previous day in any
-// timezone behind UTC).
-function parseDateOnly(dateStr) {
-  const [y, m, d] = dateStr.split('-').map(Number)
-  return new Date(y, m - 1, d)
-}
-
-function fmtDateOnly(date) {
-  const y = date.getFullYear()
-  const m = String(date.getMonth() + 1).padStart(2, '0')
-  const d = String(date.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
-}
-
-function addDays(date, n) {
-  const d = new Date(date)
-  d.setDate(d.getDate() + n)
-  return d
-}
+// Work schedule — date math now lives in shiftPatterns.js, which holds every
+// shape of working life this app understands (#453). Before that it was two
+// constants here: 21 days on, 7 off, for everybody.
+//
+// parseDateOnly / fmtDateOnly / addDays are imported from there rather than
+// defined here as well. Two copies of a date convention is two chances for
+// them to drift, and a day's drift moves somebody's off day.
 
 // Start of the display "week" containing `date`, per a configurable start
 // day (0 = Sun .. 6 = Sat, same convention as Date.getDay()). Defaults to
 // Monday, matching the old hardcoded behaviour. This is purely a display
-// grouping — cycleStatusForDate below never uses it, so changing it can't
-// affect anyone's actual on/off status, only how the schedule/headcount
-// grid buckets days for the view.
+// grouping — nothing about on/off status consults it, so changing it cannot
+// affect anyone's actual schedule, only how the grid buckets days.
 function startOfWeek(date, weekStartDay = 1) {
   const day = date.getDay()
   const diff = (day - weekStartDay + 7) % 7
   return addDays(date, -diff)
 }
 
-const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+// { status: 'on' | 'off' | 'none', blockStart? } for one employee on one day.
+//
+// Takes the EMPLOYEE, not just their anchor date, because which pattern
+// applies is a property of the person now. An employee with no pattern falls
+// back to the legacy 21/7 rotation, so this returns exactly what it used to
+// for anyone not yet migrated.
+function cycleStatusForDate(employee, patternsById, date) {
+  return statusForDate(patternFor(employee, patternsById), employee?.cycle_anchor_date, date)
+}
 
-// { status: 'on' | 'off' | 'none', blockStart? } for a single day.
-// blockStart ('YYYY-MM-DD') is only set when status is 'on' — the date the
-// current 21-day block started, used as the key for its lodge assignment.
-// Works for any date, past or future, relative to the anchor.
-function cycleStatusForDate(cycleAnchorDate, date) {
-  if (!cycleAnchorDate) return { status: 'none' }
-  const anchor = parseDateOnly(cycleAnchorDate)
-  const diffDays = Math.round((date - anchor) / 86400000)
-  let phase = diffDays % CYCLE_LENGTH
-  if (phase < 0) phase += CYCLE_LENGTH
-  if (phase < CYCLE_ON_DAYS) {
-    return { status: 'on', blockStart: fmtDateOnly(addDays(date, -phase)) }
-  }
-  return { status: 'off' }
+// How many days in [startStr, endStr] inclusive fall on a day this employee
+// was already scheduled to work — used to snapshot the leave deduction when
+// it is logged, so days that were already off cost nothing.
+//
+// The snapshot matters: hr_leave.days_used stores the figure at log time, so
+// changing somebody's pattern later does NOT retroactively rewrite what their
+// past leave cost. That is deliberate — a balance that moves under you is
+// worse than one that is slightly out of date.
+function countWorkingDaysInRange(employee, patternsById, startStr, endStr) {
+  return workingDaysInRange(
+    patternFor(employee, patternsById),
+    employee?.cycle_anchor_date,
+    startStr,
+    endStr,
+  )
 }
 
 // Is `date` covered by any logged leave period for this employee? Leave
@@ -108,22 +110,6 @@ function cycleStatusForDate(cycleAnchorDate, date) {
 function leaveOnDate(leaveRows, employeeId, date) {
   const ds = fmtDateOnly(date)
   return leaveRows.find((l) => l.employee_id === employeeId && l.start_date <= ds && l.end_date >= ds) || null
-}
-
-// How many days in [startStr, endStr] (inclusive) fall on a day this
-// employee was already scheduled to work — used to snapshot the leave
-// deduction when it's logged (days that were already off-cycle cost
-// nothing, per how you wanted leave to interact with the rotation).
-function countWorkingDaysInRange(cycleAnchorDate, startStr, endStr) {
-  if (!cycleAnchorDate) return 0
-  let count = 0
-  let d = parseDateOnly(startStr)
-  const end = parseDateOnly(endStr)
-  while (d <= end) {
-    if (cycleStatusForDate(cycleAnchorDate, d).status === 'on') count++
-    d = addDays(d, 1)
-  }
-  return count
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +565,7 @@ function AuthenticatedApp() {
   // Defaults to Monday until a company sets its own via hr_settings.
   const [weekStartDay, setWeekStartDay] = useState(1)
   const [staffingRatios, setStaffingRatios] = useState([])
+  const [shiftPatterns, setShiftPatterns] = useState([])
 
   async function loadAll() {
     setLoading(true)
@@ -645,6 +632,18 @@ function AuthenticatedApp() {
       // has ever been upserted) — fall back to Monday, the old behaviour.
       setWeekStartDay(settingsRes?.[0]?.week_start_day ?? 1)
       setStaffingRatios(ratiosRes || [])
+
+      // Fetched separately rather than added to the Promise.all above, for
+      // the reason spelled out below it: that array has a conditional branch
+      // and inserting into a positional structure like that is how a previous
+      // change silently shifted every result by one. .catch so a company that
+      // has not run add_hr_shift_patterns.sql yet still loads the app — with
+      // no patterns, every employee falls back to the legacy 21/7 rotation,
+      // which is exactly what they had before.
+      const patternsRes = await sb
+        .select('hr_shift_patterns', { company_id: companyId, active: true }, { order: 'name.asc' })
+        .catch(() => [])
+      setShiftPatterns(patternsRes || [])
       setContracts(conRes || [])
       setLoans(loanRes || [])
       setBonuses(bonusRes || [])
@@ -957,6 +956,7 @@ function AuthenticatedApp() {
               <EmployeesTab
                 companyId={companyId}
                 employees={employees}
+                shiftPatterns={shiftPatterns}
                 scheduleLocations={scheduleLocations}
                 leave={leave}
                 onAdd={addLocalEmployee}
@@ -969,6 +969,7 @@ function AuthenticatedApp() {
               <ScheduleTab
                 companyId={companyId}
                 employees={employees}
+                shiftPatterns={shiftPatterns}
                 scheduleLocations={scheduleLocations}
                 leave={leave}
                 weekStartDay={weekStartDay}
@@ -984,6 +985,7 @@ function AuthenticatedApp() {
               <LeaveTab
                 companyId={companyId}
                 employees={employees}
+                shiftPatterns={shiftPatterns}
                 leave={leave}
                 entitlements={leaveEntitlements}
                 onUpdateEmployee={updateLocalEmployee}
@@ -1494,6 +1496,7 @@ function CollapsibleCard({ title, defaultOpen = false, headerExtra, children }) 
 function ScheduleTab({
   companyId,
   employees,
+  shiftPatterns,
   scheduleLocations,
   leave,
   weekStartDay,
@@ -1538,9 +1541,18 @@ function ScheduleTab({
     return map
   }, [scheduleLocations])
 
+  // Patterns by id, so every status lookup below is a map hit rather than a
+  // scan. Built here rather than passed in because each tab needs it and the
+  // list is small.
+  const patternsById = useMemo(() => {
+    const m = {}
+    for (const pt of shiftPatterns || []) m[pt.id] = pt
+    return m
+  }, [shiftPatterns])
+
   function dayInfo(employee, date) {
     if (leaveOnDate(leave, employee.id, date)) return { status: 'leave' }
-    return cycleStatusForDate(employee.cycle_anchor_date, date)
+    return cycleStatusForDate(employee, patternsById, date)
   }
 
   function positionOf(employee) {
@@ -1549,6 +1561,14 @@ function ScheduleTab({
 
   async function saveAnchor(employeeId, value) {
     const [row] = await sb.update('hr_employees', { id: employeeId }, { cycle_anchor_date: value || null })
+    onUpdateEmployee(row)
+  }
+
+  async function savePattern(employeeId, value) {
+    // Empty means "no pattern", which the engine reads as the legacy 21/7
+    // rotation — the same thing everyone had before patterns existed, rather
+    // than no schedule at all.
+    const [row] = await sb.update('hr_employees', { id: employeeId }, { shift_pattern_id: value || null })
     onUpdateEmployee(row)
   }
 
@@ -2059,26 +2079,40 @@ function ScheduleTab({
         )}
       </CollapsibleCard>
 
-      <CollapsibleCard title="Cycles">
+      <CollapsibleCard title="Working patterns">
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-          Set any date that fell on day 1 of an employee's 21-day working block — on/off is
-          calculated forward (and backward) from there in 28-day steps, so it doesn't have to be a
-          future date. Leave blank for anyone not on the rotation.
+          Each person works to a pattern. A <strong>rotation</strong> (21 on / 7 off and the like)
+          also needs a cycle start date — any date that fell on day 1 of a working block; on/off is
+          calculated forward and backward from there, so it does not have to be in the future. A{' '}
+          <strong>fixed week</strong> pattern needs no date at all: the day of the week decides.
+        </div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Anyone left on &ldquo;No pattern set&rdquo; is treated as 21 on / 7 off — what everybody
+          was on before patterns existed — so nobody&rsquo;s schedule changes until you move them.
         </div>
         <div style={styles.tableWrap}>
           <table style={styles.table}>
             <thead>
               <tr>
                 <th style={styles.th}>Employee</th>
-                <th style={styles.th}>Cycle anchor date</th>
+                <th style={styles.th}>Pattern</th>
+                <th style={styles.th}>Cycle start date</th>
                 <th style={styles.th}>Today</th>
               </tr>
             </thead>
             <tbody>
               {employees.map((e) => {
                 const info = dayInfo(e, today)
+                const pattern = patternFor(e, patternsById)
+                const missing = missingSetup(e, pattern)
                 const label =
-                  info.status === 'on' ? 'Working' : info.status === 'leave' ? 'On leave' : info.status === 'off' ? 'Off' : 'No cycle set'
+                  info.status === 'on'
+                    ? 'Working'
+                    : info.status === 'leave'
+                      ? 'On leave'
+                      : info.status === 'off'
+                        ? 'Off'
+                        : 'No schedule'
                 const tone = info.status === 'on' ? 'good' : 'neutral'
                 return (
                   <tr key={e.id}>
@@ -2086,12 +2120,41 @@ function ScheduleTab({
                       {e.first_name} {e.last_name}
                     </td>
                     <td style={styles.td}>
-                      <input
-                        type="date"
+                      <select
                         style={styles.smallInput}
-                        defaultValue={e.cycle_anchor_date || ''}
-                        onBlur={(ev) => saveAnchor(e.id, ev.target.value)}
-                      />
+                        value={e.shift_pattern_id || ''}
+                        onChange={(ev) => savePattern(e.id, ev.target.value)}
+                      >
+                        <option value="">No pattern set — 21 on / 7 off</option>
+                        {(shiftPatterns || []).map((pt) => (
+                          <option key={pt.id} value={pt.id}>
+                            {pt.name} ({describePattern(pt)})
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td style={styles.td}>
+                      {/* A fixed-week pattern needs no anchor, so the field is
+                          not offered — an input that has no effect is worse
+                          than no input, because someone will fill it in and
+                          expect something to happen. */}
+                      {pattern.kind === 'fixed_week' ? (
+                        <span style={{ fontSize: 12, color: colors.muted }}>Not needed</span>
+                      ) : (
+                        <>
+                          <input
+                            type="date"
+                            style={styles.smallInput}
+                            defaultValue={e.cycle_anchor_date || ''}
+                            onBlur={(ev) => saveAnchor(e.id, ev.target.value)}
+                          />
+                          {missing && (
+                            <div style={{ fontSize: 11, color: colors.warn || colors.muted, marginTop: 4 }}>
+                              {missing} — no on/off can be worked out
+                            </div>
+                          )}
+                        </>
+                      )}
                     </td>
                     <td style={styles.td}>
                       <span style={styles.badge(tone)}>{label}</span>
@@ -2101,7 +2164,7 @@ function ScheduleTab({
               })}
               {employees.length === 0 && (
                 <tr>
-                  <td style={styles.td} colSpan={3}>
+                  <td style={styles.td} colSpan={4}>
                     No employees yet.
                   </td>
                 </tr>
@@ -2123,7 +2186,7 @@ function ScheduleTab({
 // nothing, since it wasn't going to be worked anyway.
 // ---------------------------------------------------------------------------
 
-function LeaveTab({ companyId, employees, leave, entitlements, onUpdateEmployee, onLeaveAdd, onLeaveRemove }) {
+function LeaveTab({ companyId, employees, shiftPatterns, leave, entitlements, onUpdateEmployee, onLeaveAdd, onLeaveRemove }) {
   const [leaveForm, setLeaveForm] = useState({
     employee_id: '',
     leave_type: 'annual',
@@ -2191,6 +2254,15 @@ function LeaveTab({ companyId, employees, leave, entitlements, onUpdateEmployee,
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [yearEntries, employeeById])
 
+  // Patterns by id, so every status lookup below is a map hit rather than a
+  // scan. Built here rather than passed in because each tab needs it and the
+  // list is small.
+  const patternsById = useMemo(() => {
+    const m = {}
+    for (const pt of shiftPatterns || []) m[pt.id] = pt
+    return m
+  }, [shiftPatterns])
+
   // BCEA balances for the employee selected in the Statutory balances card.
   // countWorkingDaysInRange is passed through rather than re-implemented in
   // leaveEngine, so the 21-on/7-off rotation logic exists in exactly one
@@ -2205,7 +2277,10 @@ function LeaveTab({ companyId, employees, leave, entitlements, onUpdateEmployee,
       entitlements: scoped,
       leaveRows: leave,
       asOf: new Date().toISOString().slice(0, 10),
-      workingDaysBetween: countWorkingDaysInRange,
+      // Adapted rather than passed raw: leaveEngine hands this the EMPLOYEE
+      // now, not just an anchor date, because which pattern applies is a
+      // property of the person.
+      workingDaysBetween: (employee, start, end) => countWorkingDaysInRange(employee, patternsById, start, end),
     })
   }, [balanceEmployeeId, employeeById, entitlements, leave])
 
@@ -2219,7 +2294,7 @@ function LeaveTab({ companyId, employees, leave, entitlements, onUpdateEmployee,
     if (leaveForm.end_date < leaveForm.start_date) return
     setLogging(true)
     const emp = employeeById[leaveForm.employee_id]
-    const daysUsed = countWorkingDaysInRange(emp?.cycle_anchor_date, leaveForm.start_date, leaveForm.end_date)
+    const daysUsed = countWorkingDaysInRange(emp, patternsById, leaveForm.start_date, leaveForm.end_date)
     const [row] = await sb.insert('hr_leave', {
       company_id: companyId,
       employee_id: leaveForm.employee_id,
@@ -2533,7 +2608,7 @@ function LeaveTab({ companyId, employees, leave, entitlements, onUpdateEmployee,
 // Employees tab — Admin/HR Admin: master list, one lodge at a time.
 // ---------------------------------------------------------------------------
 
-function EmployeesTab({ companyId, employees, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee }) {
+function EmployeesTab({ companyId, employees, shiftPatterns, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee }) {
   const today = parseDateOnly(todayStr())
 
   // hr_schedule_locations.week_start_date is always Monday-anchored no
@@ -2549,9 +2624,18 @@ function EmployeesTab({ companyId, employees, scheduleLocations, leave, onAdd, o
     return map
   }, [scheduleLocations])
 
+  // Patterns by id, so every status lookup below is a map hit rather than a
+  // scan. Built here rather than passed in because each tab needs it and the
+  // list is small.
+  const patternsById = useMemo(() => {
+    const m = {}
+    for (const pt of shiftPatterns || []) m[pt.id] = pt
+    return m
+  }, [shiftPatterns])
+
   function todayInfo(employee) {
     if (leaveOnDate(leave, employee.id, today)) return { status: 'leave' }
-    return cycleStatusForDate(employee.cycle_anchor_date, today)
+    return cycleStatusForDate(employee, patternsById, today)
   }
 
   const [form, setForm] = useState({
