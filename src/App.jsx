@@ -21,6 +21,8 @@ import { supabase } from './supabaseClient.js'
 import Login from './Login.jsx'
 import SetPassword from './SetPassword.jsx'
 import { CompanyProvider, useCompany } from './CompanyContext.jsx'
+import { SUPABASE_URL } from './supabaseClient'
+import { resolveCompanyLogo, logoStyle } from './companyLogo.js'
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -529,7 +531,19 @@ function AuthenticatedApp() {
     role: baseRole,
     isHrAdmin,
     switchCompany,
-  } = useCompany()
+    company,
+} = useCompany()
+
+  // The client's logo if they have one, ours if they don't (2026-09-22).
+  // This is the read the logo feature shipped without: the settings page wrote
+  // logo_path and nothing anywhere consumed it, so a client could upload their
+  // logo and still see Crossing Lodges on every screen.
+  const brand = resolveCompanyLogo({
+    company,
+    supabaseUrl: SUPABASE_URL,
+    fallback: '/logo.png',
+    fallbackAlt: 'Crossing Lodges',
+  });
 
   // The app's existing tab-gating logic everywhere checks role === 'admin'
   // or role === 'hradmin' — deriving the same three-value string here means
@@ -886,7 +900,12 @@ function AuthenticatedApp() {
           the topbar + bottom-nav sheet below cover mobile. */}
       <div className="sidebar">
         <div className="sidebar-logo">
-          <img src="/logo.png" alt="" onError={(e) => (e.target.style.display = 'none')} />
+          <img
+            src={brand.src}
+            alt={brand.alt}
+            style={{ width: '100%', ...logoStyle(brand.isClientLogo) }}
+            onError={(e) => { if (e.target.src !== '/logo.png') e.target.src = '/logo.png'; }}
+          />
           <div className="sidebar-sub">HR &amp; Housekeeping</div>
           <div className="sidebar-company">{companyName}</div>
         </div>

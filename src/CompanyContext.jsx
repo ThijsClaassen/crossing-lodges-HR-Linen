@@ -101,10 +101,10 @@ export function CompanyProvider({ children }) {
       let themeByCompany = {}
       const { data: themeRows, error: themeErr } = await supabase
         .from('companies')
-        .select('id, theme_accent, theme_mode')
+        .select('id, theme_accent, theme_mode, logo_path, trading_name')
       if (!themeErr) {
         for (const t of themeRows || []) {
-          themeByCompany[t.id] = { accent: t.theme_accent || null, mode: t.theme_mode || 'light' }
+          themeByCompany[t.id] = { accent: t.theme_accent || null, mode: t.theme_mode || 'light' , logoPath: t.logo_path || null, tradingName: t.trading_name || null }
         }
       }
 
@@ -118,6 +118,8 @@ export function CompanyProvider({ children }) {
           // a brand-new company gets before anyone brands it, and what every
           // company gets if the migration above hasn't run yet.
           themeAccent: themeByCompany[c.id]?.accent ?? null,
+            logoPath: themeByCompany[c.id]?.logoPath ?? null,
+            tradingName: themeByCompany[c.id]?.tradingName ?? null,
           themeMode: themeByCompany[c.id]?.mode ?? 'light',
           role: roleByCompany[c.id] || (isPlatformAdmin ? 'admin' : null),
           isHrAdmin: isPlatformAdmin || hrAdminCompanyIds.has(c.id),
@@ -201,7 +203,15 @@ export function CompanyProvider({ children }) {
     if (!current) return
     applyTheme({ accent: current.themeAccent, companyDefaultMode: current.themeMode })
   }, [current?.themeAccent, current?.themeMode])
+  // Shaped as a row so resolveCompanyLogo() takes it directly (2026-09-22).
+  // The logo feature shipped with storage and a settings page and NO reader;
+  // this is the reader.
+  const companyRow = current
+    ? { logo_path: current.logoPath, name: current.name, trading_name: current.tradingName }
+    : null
+
   const value = {
+    company: companyRow,
     // Gate on lodges too — see locationsReady above.
     loading: loading || !locationsReady,
     error,
