@@ -5568,7 +5568,8 @@ function ConfirmPopup({ message, onClose }) {
 // ---------------------------------------------------------------------------
 // Employee uniform detail — opened from either the Uniforms tab or the
 // Employees tab. Shows every item ever issued to this person, with
-// Broken/Replace and Return actions on whatever's currently issued.
+// Mark broken and Return on whatever's currently issued, and Issue
+// replacement on a broken row that hasn't been replaced yet.
 // ---------------------------------------------------------------------------
 
 function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, issues, onClose, onStockChange, onIssuesAdd, onIssuesUpdate, onIssuesRemove }) {
@@ -5605,9 +5606,37 @@ function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, i
     return it ? `${it.name}${it.size ? ` (${it.size})` : ''}` : 'Unknown item'
   }
 
+  // Which broken rows already had a replacement issued against them. Derived
+  // from replaces_issue_id rather than stored, so it stays true no matter how
+  // the replacement got there.
+  const replacedIssueIds = useMemo(
+    () => new Set(issues.filter((i) => i.replaces_issue_id).map((i) => i.replaces_issue_id)),
+    [issues]
+  )
+
+  // "Broken — replace" used to be ONE button doing three things: close the old
+  // row, issue a new one, and decrement stock. They are separate events. An
+  // item gets written off without a replacement going out more often than not
+  // — the shelf is empty, the employee is leaving, or the size was wrong and a
+  // different one is issued instead. Merging them meant every write-off
+  // silently pulled a unit out of stock whether one went out or not.
+  //
+  // So: this closes the row and touches nothing else.
+  async function markBroken(issue) {
+    const [updated] = await sb.update('hr_uniform_issues', { id: issue.id }, { status: 'broken', resolved_date: todayStr() })
+    onIssuesUpdate(updated)
+    // No stock movement, on purpose. A broken item does not go back on the
+    // shelf, and nothing has come off it either — issuing the replacement is
+    // what moves stock, and that is now its own click.
+    setConfirmMsg(`${itemName(issue.item_id)} marked broken. Use "Issue replacement" if a new one goes out.`)
+  }
+
+  // Issues a replacement against an already-broken row. Offered once per row
+  // (see replacedIssueIds) — a second click would take a second unit out of
+  // stock with nothing on screen to show the first one had happened.
   async function replaceItem(issue) {
     const stock = stockByItem[issue.item_id]
-    const [updatedOld] = await sb.update('hr_uniform_issues', { id: issue.id }, { status: 'broken', resolved_date: todayStr() })
+    const onHand = stock?.qty_on_hand ?? 0
     const [newIssue] = await sb.insert('hr_uniform_issues', {
       item_id: issue.item_id,
       employee_id: issue.employee_id,
@@ -5621,16 +5650,23 @@ function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, i
       {
         item_id: issue.item_id,
         company_id: companyId,
-        qty_on_hand: (stock?.qty_on_hand ?? 0) - 1,
+        qty_on_hand: onHand - 1,
         min_units: stock?.min_units ?? 0,
         max_units: stock?.max_units ?? 0,
       },
       'item_id'
     )
-    onIssuesUpdate(updatedOld)
     onIssuesAdd(newIssue)
     onStockChange(stockRow)
-    setConfirmMsg(`Marked broken — a replacement ${itemName(issue.item_id)} was issued to ${employee.first_name}.`)
+    // Not blocked when the shelf is empty — issueNew() does not block either,
+    // and HR hands out the last item before the count catches up often enough
+    // that refusing would just get worked around. But it is SAID, because a
+    // silent negative on-hand is how a count drifts without anyone noticing.
+    setConfirmMsg(
+      onHand > 0
+        ? `Replacement ${itemName(issue.item_id)} issued to ${employee.first_name}.`
+        : `Replacement ${itemName(issue.item_id)} issued to ${employee.first_name} — but stock was already ${onHand}, so on-hand is now ${onHand - 1}. Check the count.`
+    )
   }
 
   async function returnItem(issue) {
@@ -5752,14 +5788,22 @@ function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, i
                   <div style={{ ...styles.row, gap: 4, flexWrap: 'wrap' }}>
                     {i.status === 'issued' && (
                       <>
-                        <button style={styles.buttonGhost} onClick={() => replaceItem(i)}>
-                          Broken — replace
+                        <button style={styles.buttonGhost} onClick={() => markBroken(i)}>
+                          Mark broken
                         </button>
                         <button style={styles.buttonDanger} onClick={() => returnItem(i)}>
                           Return
                         </button>
                       </>
                     )}
+                    {i.status === 'broken' &&
+                      (replacedIssueIds.has(i.id) ? (
+                        <span style={{ fontSize: 11, color: colors.muted }}>replacement issued</span>
+                      ) : (
+                        <button style={styles.buttonGhost} onClick={() => replaceItem(i)}>
+                          Issue replacement
+                        </button>
+                      ))}
                     {canDelete &&
                       (confirmDeleteId === i.id ? (
                         <>
