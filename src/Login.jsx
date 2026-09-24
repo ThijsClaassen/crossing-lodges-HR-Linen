@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { supabase } from './supabaseClient.js'
-import { colors, fonts } from './theme.js'
+import { colors, fonts, css } from './theme.js'
 
 // Real Supabase Auth login, replacing the old shared staff/admin/hradmin
 // password checked against hr_access (2026-08-08 — HR/Linen 3b of the
@@ -106,38 +106,53 @@ export default function Login() {
     }
   }
 
+  // THE THEME HAS TO COME WITH THIS SCREEN (2026-09-24).
+  //
+  // Every colour below is a var(--token): colors.bg is "var(--surface)", and so
+  // on. Those tokens are defined in theme.js's `css`, which App.jsx injects —
+  // but App.jsx only renders that <style> once you are SIGNED IN. So on the
+  // login screen not one variable existed, every inline style resolved to
+  // nothing, and the page rendered as unstyled black text on white with no card
+  // and no input borders.
+  //
+  // It looked like a broken stylesheet. It was a stylesheet that had not loaded
+  // yet. Ops and Maintenance already injected it here for exactly this reason;
+  // this brings the rest into line.
   return (
-    <div style={styles.screen}>
-      <form onSubmit={handleSubmit} style={styles.card}>
-        <img
-          src="/logo.png"
-          alt=""
-          style={{ height: 56, width: 'auto', display: 'block', margin: '0 auto 12px' }}
-          onError={(e) => (e.target.style.display = 'none')}
-        />
-        <div style={styles.title}>Crossing Lodges — HR & Housekeeping</div>
-        <label style={styles.label}>Email or username</label>
-        <input
-          type="text"
-          style={styles.input}
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          autoFocus
-          autoComplete="username"
-        />
-        <label style={styles.label}>Password</label>
-        <input
-          type="password"
-          style={styles.input}
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          autoComplete="current-password"
-        />
-        {error && <div style={styles.error}>{error}</div>}
-        <button type="submit" style={styles.button} disabled={loading}>
-          {loading ? 'Checking…' : 'Log in'}
-        </button>
-      </form>
-    </div>
+    <>
+      <style>{css}</style>
+      <div style={styles.screen}>
+        <form onSubmit={handleSubmit} style={styles.card}>
+          <img
+            src="/logo.png"
+            alt=""
+            style={{ height: 56, width: 'auto', display: 'block', margin: '0 auto 12px' }}
+            onError={(e) => (e.target.style.display = 'none')}
+          />
+          <div style={styles.title}>Crossing Lodges — HR & Housekeeping</div>
+          <label style={styles.label}>Email or username</label>
+          <input
+            type="text"
+            style={styles.input}
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoFocus
+            autoComplete="username"
+          />
+          <label style={styles.label}>Password</label>
+          <input
+            type="password"
+            style={styles.input}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
+          />
+          {error && <div style={styles.error}>{error}</div>}
+          <button type="submit" style={styles.button} disabled={loading}>
+            {loading ? 'Checking…' : 'Log in'}
+          </button>
+        </form>
+      </div>
+    </>
   )
 }

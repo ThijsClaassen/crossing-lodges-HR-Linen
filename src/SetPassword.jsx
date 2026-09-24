@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { supabase } from './supabaseClient.js'
-import { colors, fonts } from './theme.js'
+import { colors, fonts, css } from './theme.js'
 
 // Shown once, right after someone lands back in the app from an invite or
 // password-reset email link — same component/purpose as the Finance
@@ -91,33 +91,48 @@ export default function SetPassword({ onDone }) {
     onDone()
   }
 
+  // THE THEME HAS TO COME WITH THIS SCREEN (2026-09-24).
+  //
+  // Every colour below is a var(--token): colors.bg is "var(--surface)", and so
+  // on. Those tokens are defined in theme.js's `css`, which App.jsx injects —
+  // but App.jsx only renders that <style> once you are SIGNED IN. So on the
+  // login screen not one variable existed, every inline style resolved to
+  // nothing, and the page rendered as unstyled black text on white with no card
+  // and no input borders.
+  //
+  // It looked like a broken stylesheet. It was a stylesheet that had not loaded
+  // yet. Ops and Maintenance already injected it here for exactly this reason;
+  // this brings the rest into line.
   return (
-    <div style={styles.screen}>
-      <form onSubmit={handleSubmit} style={styles.card}>
-        <div style={styles.title}>Set your password</div>
-        <div style={styles.message}>Choose a password for your account — you'll use this to log in from now on.</div>
-        <input
-          type="password"
-          placeholder="New password"
-          style={styles.input}
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          autoFocus
-          autoComplete="new-password"
-        />
-        <input
-          type="password"
-          placeholder="Confirm password"
-          style={styles.input}
-          value={confirm}
-          onChange={(e) => setConfirm(e.target.value)}
-          autoComplete="new-password"
-        />
-        {error && <div style={styles.error}>{error}</div>}
-        <button type="submit" style={styles.button} disabled={saving}>
-          {saving ? 'Saving…' : 'Set password and continue'}
-        </button>
-      </form>
-    </div>
+    <>
+      <style>{css}</style>
+      <div style={styles.screen}>
+        <form onSubmit={handleSubmit} style={styles.card}>
+          <div style={styles.title}>Set your password</div>
+          <div style={styles.message}>Choose a password for your account — you'll use this to log in from now on.</div>
+          <input
+            type="password"
+            placeholder="New password"
+            style={styles.input}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoFocus
+            autoComplete="new-password"
+          />
+          <input
+            type="password"
+            placeholder="Confirm password"
+            style={styles.input}
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            autoComplete="new-password"
+          />
+          {error && <div style={styles.error}>{error}</div>}
+          <button type="submit" style={styles.button} disabled={saving}>
+            {saving ? 'Saving…' : 'Set password and continue'}
+          </button>
+        </form>
+      </div>
+    </>
   )
 }
