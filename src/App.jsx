@@ -1039,17 +1039,29 @@ function AuthenticatedApp() {
             {activeTab === 'employees' && (role === 'admin' || role === 'hradmin') && (
               <EmployeesTab
                 companyId={companyId}
+                role={role}
                 employees={employees}
                 shiftPatterns={shiftPatterns}
                 rosteredOffDays={rosteredOffDays}
                 scheduleLocations={scheduleLocations}
                 leave={leave}
+                entitlements={leaveEntitlements}
+                contracts={contracts}
                 onAdd={addLocalEmployee}
                 onUpdate={updateLocalEmployee}
                 onRemove={removeLocalEmployee}
-                onSelectEmployee={setUniformEmployeeId}
+                onOffDayAdd={addLocalOffDay}
+                onOffDayRemove={removeLocalOffDay}
                 qualifications={qualifications}
-                onSelectQualifications={setQualEmployeeId}
+                onQualificationAdd={(row) => setQualifications((prev) => [...prev, row])}
+                onQualificationRemove={(id) => setQualifications((prev) => prev.filter((q) => q.id !== id))}
+                uniformItems={uniformItems}
+                uniformStockByItem={uniformStockByItem}
+                uniformIssues={uniformIssues}
+                onStockChange={upsertLocalUniformStock}
+                onIssuesAdd={addLocalUniformIssues}
+                onIssuesUpdate={updateLocalUniformIssues}
+                onIssuesRemove={removeLocalUniformIssue}
               />
             )}
             {activeTab === 'schedule' && (role === 'admin' || role === 'hradmin') && (
@@ -2952,458 +2964,475 @@ function LeaveTab({ companyId, employees, shiftPatterns, rosteredOffDays, leave,
 }
 
 // ---------------------------------------------------------------------------
-// Employees tab — Admin/HR Admin: master list, one lodge at a time.
+// Drawer — the detail pattern (readability pass, 2026-09-27). Thijs chose
+// tabs inside a side drawer over a centred pop-up: title + meta, tabs, a
+// scrolling body and a fixed footer. Same classes and behaviour as the Ops
+// app's Drawer so a vehicle and an employee feel like one product. Esc and
+// the scrim close it.
+// ---------------------------------------------------------------------------
+function Drawer({ title, meta, tabs, tab, onTab, onClose, footer, children }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return (
+    <>
+      <div className="drawer-scrim" onClick={onClose} />
+      <aside className="drawer" role="dialog" aria-label={title}>
+        <div className="drawer-head">
+          <div className="drawer-title">
+            <div><h2>{title}</h2>{meta && <div className="drawer-meta">{meta}</div>}</div>
+            <button className="drawer-x" onClick={onClose} title="Close (Esc)">×</button>
+          </div>
+          {tabs && (
+            <div className="drawer-tabs">
+              {tabs.map((t) => (
+                <button key={t.id} className={tab === t.id ? 'active' : ''} onClick={() => onTab(t.id)}>
+                  {t.label}{t.count != null && <span className="n">{t.count}</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="drawer-body">{children}</div>
+        {footer && <div className="drawer-foot">{footer}</div>}
+      </aside>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Employees tab — Admin/HR Admin. Slimmed 2026-09-27 (readability pass): the
+// table shows who, how they are today, where they are this week and what
+// needs attention; everything else lives in the employee drawer (Profile ·
+// Work pattern · Uniforms · Licences · Leave). The add form is a button.
 // ---------------------------------------------------------------------------
 
-function EmployeesTab({ companyId, employees, shiftPatterns, rosteredOffDays, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee, qualifications = [], onSelectQualifications }) {
+const EMPLOYEE_TABS = [
+  { id: 'profile', label: 'Profile' },
+  { id: 'pattern', label: 'Work pattern' },
+  { id: 'uniforms', label: 'Uniforms' },
+  { id: 'licences', label: 'Licences' },
+  { id: 'leave', label: 'Leave' },
+]
+
+function initials(e) {
+  return `${(e.first_name || '')[0] || ''}${(e.last_name || '')[0] || ''}`.toUpperCase() || '?'
+}
+
+function EmployeesTab({
+  companyId, role, employees, shiftPatterns, rosteredOffDays, scheduleLocations, leave, entitlements = [], contracts = [],
+  onAdd, onUpdate, onRemove, onOffDayAdd, onOffDayRemove,
+  qualifications = [], onQualificationAdd, onQualificationRemove,
+  uniformItems = [], uniformStockByItem = {}, uniformIssues = [], onStockChange, onIssuesAdd, onIssuesUpdate, onIssuesRemove,
+}) {
   const today = parseDateOnly(todayStr())
-
-  // hr_schedule_locations.week_start_date is always Monday-anchored no
-  // matter what display "week starts on" is set to in ScheduleTab (see
-  // mondayKeyOf there) — staffCostEngine.js independently computes the
-  // same Monday key from food/bev issue dates to join against this table,
-  // so this lookup must stay on the default (Monday) alignment too.
+  // hr_schedule_locations.week_start_date is always Monday-anchored no matter
+  // what display "week starts on" is set to (see ScheduleTab's mondayKeyOf).
   const thisWeekKey = fmtDateOnly(startOfWeek(today))
-
   const locationByKey = useMemo(() => {
     const map = {}
     for (const s of scheduleLocations) map[`${s.employee_id}|${s.week_start_date}`] = s
     return map
   }, [scheduleLocations])
-
-  // Patterns by id, so every status lookup below is a map hit rather than a
-  // scan. Built here rather than passed in because each tab needs it and the
-  // list is small.
   const patternsById = useMemo(() => {
     const m = {}
     for (const pt of shiftPatterns || []) m[pt.id] = pt
     return m
   }, [shiftPatterns])
-
-  // Rostered extra days, grouped once per render. The schedule grid asks about
-  // every employee on every visible day, so filtering the flat list per cell
-  // would be a full scan of the table thousands of times per render.
   const rosterByEmployee = useMemo(() => rosteredOffByEmployee(rosteredOffDays || []), [rosteredOffDays])
-
   function todayInfo(employee) {
     if (leaveOnDate(leave, employee.id, today)) return { status: 'leave' }
     return cycleStatusForDate(employee, patternsById, today, rosterByEmployee)
   }
 
-  const [form, setForm] = useState({
-    first_name: '',
-    last_name: '',
-    position: '',
-    department: '',
-    start_date: todayStr(),
-    phone: '',
-    email: '',
-  })
-  const [saving, setSaving] = useState(false)
-  const [addingPosition, setAddingPosition] = useState(false)
-  const [newPositionText, setNewPositionText] = useState('')
-  const [addingPositionForId, setAddingPositionForId] = useState(null)
-  const [rowNewPositionText, setRowNewPositionText] = useState('')
-  // Department (2026-08-19) — was a plain free-text <input> with no trim,
-  // which is exactly how the Staff Cost report ended up showing "Maintenance"
-  // and "Management" twice each: someone re-typing a department into the
-  // per-row cell added a trailing space or a stray case change, and since
-  // browsers collapse trailing whitespace when *displaying* a table cell,
-  // the duplicate was invisible in this table even though it grouped
-  // separately everywhere else. Switched to the exact same "pick from
-  // existing (deduped) values, or add a trimmed new one" pattern Position
-  // already used successfully, so this can't recur.
-  const [addingDepartment, setAddingDepartment] = useState(false)
-  const [newDepartmentText, setNewDepartmentText] = useState('')
-  const [addingDepartmentForId, setAddingDepartmentForId] = useState(null)
-  const [rowNewDepartmentText, setRowNewDepartmentText] = useState('')
+  const [search, setSearch] = useState('')
+  const [deptFilter, setDeptFilter] = useState('')
+  const [lodgeFilter, setLodgeFilter] = useState('')
+  const [openId, setOpenId] = useState(null)      // employee id, or 'new'
 
-  // Positions aren't a fixed list — just whatever's already in use on real
-  // employees, plus whatever's currently picked (so the dropdown never
-  // shows blank right after typing a new one).
-  const positionOptions = useMemo(() => {
-    const set = new Set()
-    for (const e of employees) if (e.position) set.add(e.position)
-    if (form.position) set.add(form.position)
-    return Array.from(set).sort()
-  }, [employees, form.position])
+  const departments = useMemo(() => Array.from(new Set(employees.map((e) => e.department?.trim()).filter(Boolean))).sort(), [employees])
+  const positions = useMemo(() => Array.from(new Set(employees.map((e) => e.position?.trim()).filter(Boolean))).sort(), [employees])
 
-  const departmentOptions = useMemo(() => {
-    const set = new Set()
-    for (const e of employees) if (e.department) set.add(e.department)
-    if (form.department) set.add(form.department)
-    return Array.from(set).sort()
-  }, [employees, form.department])
-
-  function confirmNewPosition() {
-    const v = newPositionText.trim()
-    if (v) setForm((f) => ({ ...f, position: v }))
-    setAddingPosition(false)
-    setNewPositionText('')
+  // What needs a look, per person — the only thing the table says beyond who
+  // and where. Same rules the Dashboard cards use.
+  function attention(e) {
+    const flags = []
+    const mine = qualifications.filter((q) => q.employee_id === e.id)
+    const expired = mine.filter((q) => expiryStatus(q) === 'expired')
+    const soon = mine.filter((q) => expiryStatus(q) === 'soon')
+    for (const q of expired) flags.push({ tone: 'bad', text: `${describeQualification(q)} expired` })
+    for (const q of soon) flags.push({ tone: 'neutral', text: `${describeQualification(q)} ${expiryLabel(q)}` })
+    if (role === 'hradmin') {
+      const c = currentContract(e.id, contracts)
+      if (c?.end_date) {
+        const d = daysUntil(c.end_date)
+        if (d !== null && d < 0) flags.push({ tone: 'bad', text: `Contract ended ${Math.abs(d)} day${Math.abs(d) === 1 ? '' : 's'} ago` })
+        else if (d !== null && d <= 60) flags.push({ tone: 'neutral', text: `Contract ends in ${d} day${d === 1 ? '' : 's'}` })
+      }
+    }
+    const missing = missingSetup(e, patternFor(e, patternsById))
+    if (missing) flags.push({ tone: 'neutral', text: missing })
+    return flags
   }
 
-  function confirmRowPosition(employeeId) {
-    const v = rowNewPositionText.trim()
-    if (v) updateEmployee(employeeId, { position: v })
-    setAddingPositionForId(null)
-    setRowNewPositionText('')
-  }
+  const rows = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return employees
+      .filter((e) => !q || `${e.first_name} ${e.last_name} ${e.position || ''} ${e.department || ''}`.toLowerCase().includes(q))
+      .filter((e) => !deptFilter || (e.department || '') === deptFilter)
+      .filter((e) => !lodgeFilter || locationByKey[`${e.id}|${thisWeekKey}`]?.location_id === lodgeFilter)
+      .sort((a, b) => `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`))
+  }, [employees, search, deptFilter, lodgeFilter, locationByKey, thisWeekKey])
 
-  function confirmNewDepartment() {
-    const v = newDepartmentText.trim()
-    if (v) setForm((f) => ({ ...f, department: v }))
-    setAddingDepartment(false)
-    setNewDepartmentText('')
-  }
+  const onLeaveToday = employees.filter((e) => leaveOnDate(leave, e.id, today)).length
+  const expiringCount = qualifications.filter((q) => employees.some((e) => e.id === q.employee_id) && expiryStatus(q) !== 'ok' && expiryStatus(q) !== 'none').length
 
-  function confirmRowDepartment(employeeId) {
-    const v = rowNewDepartmentText.trim()
-    if (v) updateEmployee(employeeId, { department: v })
-    setAddingDepartmentForId(null)
-    setRowNewDepartmentText('')
-  }
-
-  async function addEmployee() {
-    if (!form.first_name.trim() || !form.last_name.trim()) return
-    setSaving(true)
-    const [row] = await sb.insert('hr_employees', { ...form, company_id: companyId, status: 'Active' })
-    setForm({ first_name: '', last_name: '', position: '', department: '', start_date: todayStr(), phone: '', email: '' })
-    setSaving(false)
-    onAdd(row)
-  }
-
-  async function updateEmployee(id, patch) {
-    const [row] = await sb.update('hr_employees', { id }, patch)
-    onUpdate(row)
-  }
-
-  async function deactivate(id) {
-    await sb.update('hr_employees', { id }, { active: false })
-    onRemove(id)
-  }
+  const openEmployee = openId && openId !== 'new' ? employees.find((e) => e.id === openId) : null
 
   return (
     <>
-      <div style={styles.card}>
-        <div style={styles.cardTitle}>Add employee</div>
-        <div style={styles.formGrid}>
-          <div>
-            <label style={styles.label}>First name</label>
-            <input style={styles.input} value={form.first_name} onChange={(e) => setForm({ ...form, first_name: e.target.value })} />
-          </div>
-          <div>
-            <label style={styles.label}>Last name</label>
-            <input style={styles.input} value={form.last_name} onChange={(e) => setForm({ ...form, last_name: e.target.value })} />
-          </div>
-          <div>
-            <label style={styles.label}>Position</label>
-            {addingPosition ? (
-              <div style={{ ...styles.row, gap: 4 }}>
-                <input
-                  autoFocus
-                  style={styles.input}
-                  placeholder="New position name"
-                  value={newPositionText}
-                  onChange={(e) => setNewPositionText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault()
-                      confirmNewPosition()
-                    }
-                  }}
-                />
-                <button style={styles.buttonGhost} onClick={confirmNewPosition}>
-                  Use
-                </button>
-                <button
-                  style={styles.buttonGhost}
-                  onClick={() => {
-                    setAddingPosition(false)
-                    setNewPositionText('')
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <select
-                style={styles.input}
-                value={form.position}
-                onChange={(e) => {
-                  if (e.target.value === '__new__') setAddingPosition(true)
-                  else setForm({ ...form, position: e.target.value })
-                }}
-              >
-                <option value="">No position set</option>
-                {positionOptions.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-                <option value="__new__">+ Add new position…</option>
-              </select>
-            )}
-          </div>
-          <div>
-            <label style={styles.label}>Department</label>
-            {addingDepartment ? (
-              <div style={{ ...styles.row, gap: 4 }}>
-                <input
-                  autoFocus
-                  style={styles.input}
-                  placeholder="New department name"
-                  value={newDepartmentText}
-                  onChange={(e) => setNewDepartmentText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault()
-                      confirmNewDepartment()
-                    }
-                  }}
-                />
-                <button style={styles.buttonGhost} onClick={confirmNewDepartment}>
-                  Use
-                </button>
-                <button
-                  style={styles.buttonGhost}
-                  onClick={() => {
-                    setAddingDepartment(false)
-                    setNewDepartmentText('')
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <select
-                style={styles.input}
-                value={form.department}
-                onChange={(e) => {
-                  if (e.target.value === '__new__') setAddingDepartment(true)
-                  else setForm({ ...form, department: e.target.value })
-                }}
-              >
-                <option value="">No department set</option>
-                {departmentOptions.map((d) => (
-                  <option key={d} value={d}>
-                    {d}
-                  </option>
-                ))}
-                <option value="__new__">+ Add new department…</option>
-              </select>
-            )}
-          </div>
-          <div>
-            <label style={styles.label}>Start date</label>
-            <input
-              type="date"
-              style={styles.input}
-              value={form.start_date}
-              onChange={(e) => setForm({ ...form, start_date: e.target.value })}
-            />
-          </div>
-          <div>
-            <label style={styles.label}>Phone</label>
-            <input style={styles.input} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
-          </div>
-          <div>
-            <label style={styles.label}>Email</label>
-            <input style={styles.input} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, marginBottom: 12 }}>
+        <div>
+          <div style={{ fontSize: 13, color: colors.muted }}>
+            {employees.length} active · {onLeaveToday} on leave today{expiringCount ? ` · ${expiringCount} licence${expiringCount === 1 ? '' : 's'} expiring or expired` : ''}
           </div>
         </div>
-        <button style={styles.button} onClick={addEmployee} disabled={saving}>
-          {saving ? 'Adding…' : 'Add employee'}
-        </button>
+        <button style={{ ...styles.button, marginLeft: 'auto' }} onClick={() => setOpenId('new')}>+ Add employee</button>
+      </div>
+      <div className="toolbar">
+        <input placeholder="Search by name, position or department…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <select value={deptFilter} onChange={(e) => setDeptFilter(e.target.value)}>
+          <option value="">All departments</option>
+          {departments.map((d) => <option key={d} value={d}>{d}</option>)}
+        </select>
+        <select value={lodgeFilter} onChange={(e) => setLodgeFilter(e.target.value)}>
+          <option value="">All lodges (this week)</option>
+          {LOCATIONS.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+        </select>
       </div>
 
       <div style={styles.card}>
-        <div style={styles.cardTitle}>{employees.length} employees</div>
         <div style={styles.tableWrap}>
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Name</th>
-              <th style={styles.th}>Today</th>
-              <th style={styles.th}>Uniforms</th>
-              <th style={styles.th}>Licences</th>
-              <th style={styles.th}>Position</th>
-              <th style={styles.th}>Department</th>
-              <th style={styles.th}>Start date</th>
-              <th style={styles.th}>Phone</th>
-              <th style={styles.th}>Email</th>
-              <th style={styles.th}>Status</th>
-              <th style={styles.th}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {employees.map((e) => {
-              const info = todayInfo(e)
-              const weekLoc = info.status === 'on' ? locationByKey[`${e.id}|${thisWeekKey}`] : null
-              const label =
-                info.status === 'on'
-                  ? `Working${weekLoc ? ` — ${weekLoc.location_id}` : ''}`
-                  : info.status === 'leave'
-                    ? 'On leave'
-                    : info.status === 'off'
-                      ? 'Off'
-                      : '—'
-              const tone = info.status === 'on' ? 'good' : 'neutral'
-              return (
-              <tr key={e.id}>
-                <td style={styles.td}>
-                  {e.first_name} {e.last_name}
-                </td>
-                <td style={styles.td}>
-                  <span style={styles.badge(tone)}>{label}</span>
-                </td>
-                <td style={styles.td}>
-                  <button style={styles.buttonGhost} onClick={() => onSelectEmployee(e.id)}>
-                    View items
-                  </button>
-                </td>
-                <td style={styles.td}>
-                  {(() => {
-                    const mine = qualifications.filter((q) => q.employee_id === e.id)
-                    const lic = bestLicence(mine)
-                    const worst = mine.some((q) => expiryStatus(q) === 'expired') ? 'bad' : mine.some((q) => expiryStatus(q) === 'soon') ? 'warn' : 'neutral'
-                    return (
-                      <button style={styles.buttonGhost} onClick={() => onSelectQualifications?.(e.id)} title="Licences & qualifications">
-                        {mine.length === 0 ? 'Add' : <span style={styles.badge(worst === 'warn' ? 'neutral' : worst)}>{lic ? `Code ${lic.category || '?'}` : ''}{lic && mine.length > 1 ? ' +' : ''}{!lic ? `${mine.length}` : ''}{mine.length > 1 && lic ? `${mine.length - 1}` : ''}{worst === 'bad' ? ' — expired' : worst === 'warn' ? ' — expiring' : ''}</span>}
-                      </button>
-                    )
-                  })()}
-                </td>
-                <td style={styles.td}>
-                  {addingPositionForId === e.id ? (
-                    <div style={{ ...styles.row, gap: 4 }}>
-                      <input
-                        autoFocus
-                        style={{ ...styles.smallInput, width: 100 }}
-                        placeholder="New position"
-                        value={rowNewPositionText}
-                        onChange={(ev) => setRowNewPositionText(ev.target.value)}
-                        onKeyDown={(ev) => {
-                          if (ev.key === 'Enter') {
-                            ev.preventDefault()
-                            confirmRowPosition(e.id)
-                          }
-                        }}
-                      />
-                      <button style={styles.buttonGhost} onClick={() => confirmRowPosition(e.id)}>
-                        Use
-                      </button>
-                    </div>
-                  ) : (
-                    <select
-                      style={{ ...styles.smallInput, width: 110 }}
-                      defaultValue={e.position || ''}
-                      onChange={(ev) => {
-                        if (ev.target.value === '__new__') {
-                          setAddingPositionForId(e.id)
-                          setRowNewPositionText('')
-                        } else {
-                          updateEmployee(e.id, { position: ev.target.value })
-                        }
-                      }}
-                    >
-                      <option value="">No position set</option>
-                      {positionOptions.map((p) => (
-                        <option key={p} value={p}>
-                          {p}
-                        </option>
-                      ))}
-                      <option value="__new__">+ Add new position…</option>
-                    </select>
-                  )}
-                </td>
-                <td style={styles.td}>
-                  {addingDepartmentForId === e.id ? (
-                    <div style={{ ...styles.row, gap: 4 }}>
-                      <input
-                        autoFocus
-                        style={{ ...styles.smallInput, width: 100 }}
-                        placeholder="New department"
-                        value={rowNewDepartmentText}
-                        onChange={(ev) => setRowNewDepartmentText(ev.target.value)}
-                        onKeyDown={(ev) => {
-                          if (ev.key === 'Enter') {
-                            ev.preventDefault()
-                            confirmRowDepartment(e.id)
-                          }
-                        }}
-                      />
-                      <button style={styles.buttonGhost} onClick={() => confirmRowDepartment(e.id)}>
-                        Use
-                      </button>
-                    </div>
-                  ) : (
-                    <select
-                      style={{ ...styles.smallInput, width: 110 }}
-                      defaultValue={e.department || ''}
-                      onChange={(ev) => {
-                        if (ev.target.value === '__new__') {
-                          setAddingDepartmentForId(e.id)
-                          setRowNewDepartmentText('')
-                        } else {
-                          updateEmployee(e.id, { department: ev.target.value })
-                        }
-                      }}
-                    >
-                      <option value="">No department set</option>
-                      {departmentOptions.map((d) => (
-                        <option key={d} value={d}>
-                          {d}
-                        </option>
-                      ))}
-                      <option value="__new__">+ Add new department…</option>
-                    </select>
-                  )}
-                </td>
-                <td style={styles.td}>{e.start_date || '—'}</td>
-                <td style={styles.td}>
-                  <input
-                    style={{ ...styles.smallInput, width: 110 }}
-                    defaultValue={e.phone || ''}
-                    onBlur={(ev) => updateEmployee(e.id, { phone: ev.target.value })}
-                  />
-                </td>
-                <td style={styles.td}>
-                  <input
-                    style={{ ...styles.smallInput, width: 150 }}
-                    defaultValue={e.email || ''}
-                    onBlur={(ev) => updateEmployee(e.id, { email: ev.target.value })}
-                  />
-                </td>
-                <td style={styles.td}>
-                  <select
-                    style={styles.smallInput}
-                    defaultValue={e.status || 'Active'}
-                    onChange={(ev) => updateEmployee(e.id, { status: ev.target.value })}
-                  >
-                    <option value="Active">Active</option>
-                    <option value="Inactive">Inactive</option>
-                  </select>
-                </td>
-                <td style={styles.td}>
-                  <button style={styles.buttonDanger} onClick={() => deactivate(e.id)}>
-                    Remove
-                  </button>
-                </td>
-              </tr>
-              )
-            })}
-            {employees.length === 0 && (
+          <table style={styles.table}>
+            <thead>
               <tr>
-                <td style={styles.td} colSpan={11}>
-                  No employees yet — add one above.
-                </td>
+                <th style={styles.th}>Employee</th>
+                <th style={styles.th}>Today</th>
+                <th style={styles.th}>This week</th>
+                <th style={styles.th}>Needs attention</th>
+                <th style={styles.th}></th>
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((e) => {
+                const info = todayInfo(e)
+                const weekLoc = locationByKey[`${e.id}|${thisWeekKey}`]
+                const label = info.status === 'on' ? 'Working' : info.status === 'leave' ? 'On leave' : info.status === 'off' ? 'Off' : '—'
+                const flags = attention(e)
+                return (
+                  <tr key={e.id} className="emp-row" onClick={() => setOpenId(e.id)}>
+                    <td style={{ ...styles.td, whiteSpace: 'normal' }}>
+                      <div style={{ display: 'flex', alignItems: 'center' }}>
+                        <span className="avatar">{initials(e)}</span>
+                        <span>
+                          <strong>{e.first_name} {e.last_name}</strong>
+                          <span className="emp-sub">{[e.position, e.department].filter(Boolean).join(' · ') || 'No position set'}{e.start_date ? ` · since ${e.start_date.slice(0, 7)}` : ''}</span>
+                        </span>
+                      </div>
+                    </td>
+                    <td style={styles.td}><span style={styles.badge(info.status === 'on' ? 'good' : 'neutral')}>{label}</span></td>
+                    <td style={styles.td}>{weekLoc ? (LOCATIONS.find((l) => l.id === weekLoc.location_id)?.name || weekLoc.location_id) : <span style={{ color: colors.muted }}>—</span>}</td>
+                    <td style={{ ...styles.td, whiteSpace: 'normal' }}>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {flags.slice(0, 3).map((f, i) => <span key={i} style={styles.badge(f.tone)}>{f.text}</span>)}
+                        {flags.length > 3 && <span style={styles.badge('neutral')}>+{flags.length - 3}</span>}
+                      </div>
+                    </td>
+                    <td style={{ ...styles.td, textAlign: 'right' }}>
+                      <button style={styles.buttonGhost} onClick={(ev) => { ev.stopPropagation(); setOpenId(e.id) }}>Open</button>
+                    </td>
+                  </tr>
+                )
+              })}
+              {rows.length === 0 && (
+                <tr><td style={styles.td} colSpan={5}>{employees.length === 0 ? 'No employees yet — add one with the button above.' : 'Nobody matches that search.'}</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ fontSize: 11, color: colors.muted, marginTop: 8 }}>
+          Showing {rows.length} of {employees.length}. Phone, email, pattern, uniforms, licences and leave live in the employee panel — click a row.
         </div>
       </div>
+
+      {(openId === 'new' || openEmployee) && (
+        <EmployeeDrawer
+          key={openId}
+          companyId={companyId}
+          role={role}
+          employee={openEmployee}
+          positions={positions}
+          departments={departments}
+          shiftPatterns={shiftPatterns}
+          patternsById={patternsById}
+          rosteredOffDays={rosteredOffDays}
+          rosterByEmployee={rosterByEmployee}
+          leave={leave}
+          entitlements={entitlements}
+          contracts={contracts}
+          qualifications={qualifications}
+          uniformItems={uniformItems}
+          uniformStockByItem={uniformStockByItem}
+          uniformIssues={uniformIssues}
+          onStockChange={onStockChange}
+          onIssuesAdd={onIssuesAdd}
+          onIssuesUpdate={onIssuesUpdate}
+          onIssuesRemove={onIssuesRemove}
+          onQualificationAdd={onQualificationAdd}
+          onQualificationRemove={onQualificationRemove}
+          onOffDayAdd={onOffDayAdd}
+          onOffDayRemove={onOffDayRemove}
+          onAdd={(row) => { onAdd(row); setOpenId(row.id) }}
+          onUpdate={onUpdate}
+          onRemove={(id) => { onRemove(id); setOpenId(null) }}
+          onClose={() => setOpenId(null)}
+          thisWeekLodge={openEmployee ? locationByKey[`${openEmployee.id}|${thisWeekKey}`]?.location_id : null}
+          todayStatus={openEmployee ? todayInfo(openEmployee).status : null}
+        />
+      )}
     </>
+  )
+}
+
+const BLANK_EMPLOYEE = { first_name: '', last_name: '', position: '', department: '', start_date: todayStr(), phone: '', email: '', status: 'Active', notes: '' }
+
+function EmployeeDrawer({
+  companyId, role, employee, positions, departments, shiftPatterns, patternsById, rosteredOffDays, rosterByEmployee, leave, entitlements, contracts,
+  qualifications, uniformItems, uniformStockByItem, uniformIssues, onStockChange, onIssuesAdd, onIssuesUpdate, onIssuesRemove,
+  onQualificationAdd, onQualificationRemove, onOffDayAdd, onOffDayRemove, onAdd, onUpdate, onRemove, onClose, thisWeekLodge, todayStatus,
+}) {
+  const isNew = !employee
+  const [tab, setTab] = useState('profile')
+  const [form, setForm] = useState(() => isNew ? BLANK_EMPLOYEE : {
+    first_name: employee.first_name || '', last_name: employee.last_name || '', position: employee.position || '', department: employee.department || '',
+    start_date: employee.start_date || '', phone: employee.phone || '', email: employee.email || '', status: employee.status || 'Active', notes: employee.notes || '',
+  })
+  const [newPosition, setNewPosition] = useState(false)
+  const [newDepartment, setNewDepartment] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [msg, setMsg] = useState('')
+  const dirty = !isNew && Object.keys(form).some((k) => (form[k] || '') !== (employee[k] || (k === 'status' ? 'Active' : '')))
+  const f = (k) => (e) => setForm((x) => ({ ...x, [k]: e.target.value }))
+
+  async function save() {
+    setError(''); setMsg('')
+    if (!form.first_name.trim() || !form.last_name.trim()) { setError('First and last name are needed.'); return }
+    setSaving(true)
+    try {
+      const patch = { ...form, first_name: form.first_name.trim(), last_name: form.last_name.trim(), position: form.position.trim() || null, department: form.department.trim() || null, start_date: form.start_date || null, phone: form.phone.trim() || null, email: form.email.trim() || null, notes: form.notes.trim() || null }
+      if (isNew) {
+        const [row] = await sb.insert('hr_employees', { ...patch, company_id: companyId })
+        onAdd(row)
+        setMsg('Added. The other tabs are now available.')
+      } else {
+        const [row] = await sb.update('hr_employees', { id: employee.id }, patch)
+        onUpdate(row)
+        setMsg('Saved.')
+      }
+    } catch (err) { setError(err.message) } finally { setSaving(false) }
+  }
+  async function deactivate() {
+    if (!window.confirm(`Deactivate ${employee.first_name} ${employee.last_name}? They stay in history but leave the active list.`)) return
+    await sb.update('hr_employees', { id: employee.id }, { active: false })
+    onRemove(employee.id)
+  }
+
+  // Work pattern
+  async function savePattern(value) {
+    const [row] = await sb.update('hr_employees', { id: employee.id }, { shift_pattern_id: value || null })
+    onUpdate(row)
+  }
+  async function saveAnchor(value) {
+    const [row] = await sb.update('hr_employees', { id: employee.id }, { cycle_anchor_date: value || null })
+    onUpdate(row)
+  }
+  const [offDate, setOffDate] = useState(todayStr())
+  const [offNote, setOffNote] = useState('')
+  async function giveOffDay() {
+    if (!offDate) return
+    const [row] = await sb.insert('hr_employee_off_days', { company_id: companyId, employee_id: employee.id, off_date: offDate, note: offNote.trim() || null })
+    onOffDayAdd(row); setOffNote('')
+  }
+  async function takeOffDay(id) {
+    await sb.remove('hr_employee_off_days', { id }); onOffDayRemove(id)
+  }
+  const myOffDays = (rosteredOffDays || []).filter((d) => employee && d.employee_id === employee.id).sort((a, b) => String(b.off_date).localeCompare(String(a.off_date)))
+  const next14 = useMemo(() => {
+    if (!employee) return []
+    const start = parseDateOnly(todayStr())
+    return Array.from({ length: 14 }, (_, i) => {
+      const d = addDays(start, i)
+      const st = leaveOnDate(leave, employee.id, d) ? 'leave' : cycleStatusForDate(employee, patternsById, d, rosterByEmployee).status
+      return { date: d, st }
+    })
+  }, [employee, leave, patternsById, rosterByEmployee])
+
+  // Leave
+  const balances = useMemo(() => {
+    if (!employee) return []
+    const scoped = (entitlements || []).map((ent) => entitlementForEmployee(ent, employee))
+    return allBalances({
+      employee, entitlements: scoped, leaveRows: leave, asOf: todayStr(),
+      workingDaysBetween: (emp, start, end) => countWorkingDaysInRange(emp, patternsById, start, end, rosterByEmployee),
+    })
+  }, [employee, entitlements, leave, patternsById, rosterByEmployee])
+  const myLeave = (leave || []).filter((l) => employee && l.employee_id === employee.id).sort((a, b) => String(b.start_date).localeCompare(String(a.start_date)))
+
+  const myQuals = qualifications.filter((q) => employee && q.employee_id === employee.id)
+  const myIssues = uniformIssues.filter((i) => employee && i.employee_id === employee.id && i.status === 'issued')
+  const contract = employee && role === 'hradmin' ? currentContract(employee.id, contracts) : null
+  const tabs = isNew ? EMPLOYEE_TABS.filter((t) => t.id === 'profile') : EMPLOYEE_TABS.map((t) =>
+    t.id === 'uniforms' ? { ...t, count: myIssues.length } : t.id === 'licences' ? { ...t, count: myQuals.length } : t)
+
+  const meta = employee ? (
+    <>
+      <span>{[employee.position, employee.department].filter(Boolean).join(' · ') || 'No position set'}{thisWeekLodge ? ` · ${LOCATIONS.find((l) => l.id === thisWeekLodge)?.name || thisWeekLodge} this week` : ''}</span>
+      {todayStatus && <span style={styles.badge(todayStatus === 'on' ? 'good' : 'neutral')}>{todayStatus === 'on' ? 'Working today' : todayStatus === 'leave' ? 'On leave' : 'Off today'}</span>}
+    </>
+  ) : 'Name, position and department first; pattern, uniforms and licences once they exist.'
+
+  return (
+    <Drawer
+      title={isNew ? 'New employee' : `${employee.first_name} ${employee.last_name}`}
+      meta={meta} tabs={tabs} tab={tab} onTab={setTab} onClose={onClose}
+      footer={<>
+        <button style={styles.button} onClick={save} disabled={saving}>{saving ? 'Saving…' : isNew ? 'Add employee' : 'Save changes'}</button>
+        <button style={styles.buttonGhost} onClick={onClose}>{dirty ? 'Cancel' : 'Close'}</button>
+        {!isNew && <button style={{ ...styles.buttonDanger, marginLeft: 6 }} onClick={deactivate}>Deactivate</button>}
+        <span className="hint">{error ? <span style={{ color: colors.danger }}>{error}</span> : msg || (dirty ? 'Unsaved changes' : '')}</span>
+      </>}
+    >
+      {tab === 'profile' && (
+        <>
+          <div className="drawer-grid">
+            <div className="field"><label style={styles.label}>First name</label><input style={styles.input} value={form.first_name} onChange={f('first_name')} /></div>
+            <div className="field"><label style={styles.label}>Last name</label><input style={styles.input} value={form.last_name} onChange={f('last_name')} /></div>
+            <div className="field"><label style={styles.label}>Position</label>
+              {newPosition ? (
+                <input style={styles.input} autoFocus placeholder="New position" value={form.position} onChange={f('position')} onBlur={() => setNewPosition(false)} />
+              ) : (
+                <select style={styles.input} value={form.position} onChange={(e) => { if (e.target.value === '__new') { setForm((x) => ({ ...x, position: '' })); setNewPosition(true) } else setForm((x) => ({ ...x, position: e.target.value })) }}>
+                  <option value="">—</option>
+                  {Array.from(new Set([...positions, form.position].filter(Boolean))).sort().map((p) => <option key={p} value={p}>{p}</option>)}
+                  <option value="__new">+ New position…</option>
+                </select>
+              )}
+            </div>
+            <div className="field"><label style={styles.label}>Department</label>
+              {newDepartment ? (
+                <input style={styles.input} autoFocus placeholder="New department" value={form.department} onChange={f('department')} onBlur={() => setNewDepartment(false)} />
+              ) : (
+                <select style={styles.input} value={form.department} onChange={(e) => { if (e.target.value === '__new') { setForm((x) => ({ ...x, department: '' })); setNewDepartment(true) } else setForm((x) => ({ ...x, department: e.target.value })) }}>
+                  <option value="">—</option>
+                  {Array.from(new Set([...departments, form.department].filter(Boolean))).sort().map((d) => <option key={d} value={d}>{d}</option>)}
+                  <option value="__new">+ New department…</option>
+                </select>
+              )}
+            </div>
+            <div className="field"><label style={styles.label}>Start date</label><input type="date" style={styles.input} value={form.start_date} onChange={f('start_date')} /></div>
+            <div className="field"><label style={styles.label}>Status</label>
+              <select style={styles.input} value={form.status} onChange={f('status')}><option value="Active">Active</option><option value="Inactive">Inactive</option></select>
+            </div>
+            <div className="field"><label style={styles.label}>Phone</label><input style={styles.input} value={form.phone} onChange={f('phone')} /></div>
+            <div className="field"><label style={styles.label}>Email</label><input type="email" style={styles.input} value={form.email} onChange={f('email')} /></div>
+            <div className="field full"><label style={styles.label}>Notes</label><input style={styles.input} value={form.notes} onChange={f('notes')} /></div>
+          </div>
+          {!isNew && role === 'hradmin' && (
+            <>
+              <div className="drawer-sect">Contract</div>
+              <div style={{ fontSize: 13 }}>
+                {contract ? `${contract.contract_type || 'Contract'}, ${contract.start_date || '?'} → ${contract.end_date || 'open-ended'}` : 'No contract on file.'}
+                <span style={{ color: colors.muted }}> · managed under Contracts</span>
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      {tab === 'pattern' && employee && (
+        <>
+          <div className="drawer-grid">
+            <div className="field"><label style={styles.label}>Shift pattern</label>
+              <select style={styles.input} value={employee.shift_pattern_id || ''} onChange={(e) => savePattern(e.target.value)}>
+                <option value="">No pattern set — 21 on / 7 off</option>
+                {(shiftPatterns || []).map((pt) => <option key={pt.id} value={pt.id}>{pt.name} — {describePattern(pt)}</option>)}
+              </select>
+            </div>
+            <div className="field"><label style={styles.label}>Cycle start date</label>
+              <input type="date" style={styles.input} defaultValue={employee.cycle_anchor_date || ''} onBlur={(e) => saveAnchor(e.target.value)} />
+              <div style={{ fontSize: 11, color: colors.muted, marginTop: 4 }}>{describePattern(patternFor(employee, patternsById))}{missingSetup(employee, patternFor(employee, patternsById)) ? ` — ${missingSetup(employee, patternFor(employee, patternsById))}` : ''}</div>
+            </div>
+          </div>
+          <div className="drawer-sect">Next 14 days</div>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {next14.map(({ date, st }) => (
+              <span key={fmtDateOnly(date)} style={styles.badge(st === 'on' ? 'good' : 'neutral')}>
+                {WEEKDAY_NAMES[date.getDay()]?.slice(0, 3)} {date.getDate()}{st === 'off' ? ' off' : st === 'leave' ? ' leave' : ''}
+              </span>
+            ))}
+          </div>
+          <div className="drawer-sect">Extra off days given</div>
+          <table style={styles.table}><tbody>
+            {myOffDays.map((d) => (
+              <tr key={d.id}><td style={styles.td}>{d.off_date}</td><td style={styles.td}>{d.note || ''}</td><td style={{ ...styles.td, textAlign: 'right' }}><button style={styles.buttonGhost} onClick={() => takeOffDay(d.id)}>Remove</button></td></tr>
+            ))}
+            {myOffDays.length === 0 && <tr><td style={styles.td} colSpan={3}>None.</td></tr>}
+          </tbody></table>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'end', marginTop: 10, flexWrap: 'wrap' }}>
+            <div><label style={styles.label}>Date</label><input type="date" style={styles.input} value={offDate} onChange={(e) => setOffDate(e.target.value)} /></div>
+            <div style={{ flex: 1, minWidth: 160 }}><label style={styles.label}>Note</label><input style={styles.input} value={offNote} onChange={(e) => setOffNote(e.target.value)} placeholder="e.g. Youth Day swap" /></div>
+            <button style={styles.buttonGhost} onClick={giveOffDay}>+ Give an extra off day</button>
+          </div>
+        </>
+      )}
+
+      {tab === 'uniforms' && employee && (
+        <EmployeeUniformModal
+          embedded role={role} companyId={companyId} employee={employee} items={uniformItems} stockByItem={uniformStockByItem} issues={uniformIssues}
+          onClose={() => {}} onStockChange={onStockChange} onIssuesAdd={onIssuesAdd} onIssuesUpdate={onIssuesUpdate} onIssuesRemove={onIssuesRemove}
+        />
+      )}
+
+      {tab === 'licences' && employee && (
+        <EmployeeQualificationsModal embedded companyId={companyId} employee={employee} rows={myQuals} onClose={() => {}} onAdd={onQualificationAdd} onRemove={onQualificationRemove} />
+      )}
+
+      {tab === 'leave' && employee && (
+        <>
+          <div style={{ ...styles.row, gap: 20, flexWrap: 'wrap', marginBottom: 10 }}>
+            {balances.map((b) => (
+              <div key={b.leaveType}>
+                <div style={{ fontSize: 20, fontFamily: fonts.mono, color: colors.goldLt }}>{b.remaining != null ? b.remaining : '—'}</div>
+                <div style={{ fontSize: 11, color: colors.muted }}>{LEAVE_TYPE_LABELS[b.leaveType] || b.leaveType} left{b.used != null ? ` · ${b.used} used` : ''}</div>
+              </div>
+            ))}
+          </div>
+          <table style={styles.table}>
+            <thead><tr><th style={styles.th}>Dates</th><th style={styles.th}>Type</th><th style={{ ...styles.th, textAlign: 'right' }}>Days</th><th style={styles.th}>Note</th></tr></thead>
+            <tbody>
+              {myLeave.map((l) => (
+                <tr key={l.id}><td style={styles.td}>{l.start_date}{l.end_date && l.end_date !== l.start_date ? ` → ${l.end_date}` : ''}</td><td style={styles.td}>{LEAVE_TYPE_LABELS[l.leave_type || 'annual'] || l.leave_type}</td><td style={{ ...styles.td, textAlign: 'right' }}>{l.days_used}</td><td style={{ ...styles.td, whiteSpace: 'normal' }}>{l.note || ''}</td></tr>
+              ))}
+              {myLeave.length === 0 && <tr><td style={styles.td} colSpan={4}>No leave recorded.</td></tr>}
+            </tbody>
+          </table>
+          <div style={{ fontSize: 11, color: colors.muted, marginTop: 8 }}>Leave is recorded under the Leave tab, where the balances and rules live.</div>
+        </>
+      )}
+    </Drawer>
   )
 }
 
@@ -5738,7 +5767,7 @@ function ConfirmPopup({ message, onClose }) {
 // replacement on a broken row that hasn't been replaced yet.
 // ---------------------------------------------------------------------------
 
-function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, issues, onClose, onStockChange, onIssuesAdd, onIssuesUpdate, onIssuesRemove }) {
+function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, issues, onClose, onStockChange, onIssuesAdd, onIssuesUpdate, onIssuesRemove, embedded = false }) {
   const [confirmMsg, setConfirmMsg] = useState(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
   const canDelete = role === 'hradmin'
@@ -5882,32 +5911,8 @@ function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, i
     setConfirmMsg(`Removed ${itemName(issue.item_id)} from ${employee.first_name}'s history.`)
   }
 
-  return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.6)',
-        zIndex: 60,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 16,
-      }}
-      onClick={onClose}
-    >
-      <div
-        style={{ ...styles.card, maxWidth: 600, width: '100%', maxHeight: '85vh', overflowY: 'auto' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
-          <div style={styles.cardTitle}>
-            {employee.first_name} {employee.last_name} — uniform items
-          </div>
-          <button style={styles.buttonGhost} onClick={onClose}>
-            Close
-          </button>
-        </div>
+  const content = (
+    <>
         {currentByCategory.length > 0 ? (
           <div style={{ ...styles.row, flexWrap: 'wrap', gap: 6, marginTop: 8, marginBottom: 10 }}>
             {currentByCategory.map(([cat, n]) => (
@@ -5999,9 +6004,40 @@ function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, i
           </tbody>
         </table>
         </div>
-      </div>
-
       {confirmMsg && <ConfirmPopup message={confirmMsg} onClose={() => setConfirmMsg(null)} />}
+    </>
+  )
+  // Embedded (2026-09-27): rendered inside the employee drawer's Uniforms
+  // tab — no overlay, no header; the drawer supplies both.
+  if (embedded) return content
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.6)',
+        zIndex: 60,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{ ...styles.card, maxWidth: 600, width: '100%', maxHeight: '85vh', overflowY: 'auto' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
+          <div style={styles.cardTitle}>
+            {employee.first_name} {employee.last_name} — uniform items
+          </div>
+          <button style={styles.buttonGhost} onClick={onClose}>
+            Close
+          </button>
+        </div>
+        {content}
+      </div>
     </div>
   )
 }
@@ -6012,7 +6048,7 @@ function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, i
 // too. Anything with a future expiry shows up on the Dashboard card once it
 // is within 60 days; the Ops vehicle log reads the driver's-licence rows.
 // ---------------------------------------------------------------------------
-function EmployeeQualificationsModal({ companyId, employee, rows, onClose, onAdd, onRemove }) {
+function EmployeeQualificationsModal({ companyId, employee, rows, onClose, onAdd, onRemove, embedded = false }) {
   const blank = { kind: 'drivers_licence', category: 'B', title: '', doc_number: '', issued_on: '', expires_on: '', note: '' }
   const [form, setForm] = useState(blank)
   const [file, setFile] = useState(null)
@@ -6079,18 +6115,8 @@ function EmployeeQualificationsModal({ companyId, employee, rows, onClose, onAdd
 
   const sorted = [...rows].sort((a, b) => String(a.expires_on || '9999').localeCompare(String(b.expires_on || '9999')))
 
-  return (
-    <div
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
-      onClick={onClose}
-    >
-      <div style={{ ...styles.card, maxWidth: 680, width: '100%', maxHeight: '85vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
-        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
-          <div style={styles.cardTitle}>
-            {employee.first_name} {employee.last_name} — licences & qualifications
-          </div>
-          <button style={styles.buttonGhost} onClick={onClose}>Close</button>
-        </div>
+  const content = (
+    <>
 
         {error && <div style={{ ...styles.banner, marginTop: 8 }}>{error}</div>}
 
@@ -6198,6 +6224,22 @@ function EmployeeQualificationsModal({ companyId, employee, rows, onClose, onAdd
             {saving ? 'Saving…' : 'Add document'}
           </button>
         </form>
+    </>
+  )
+  if (embedded) return content
+  return (
+    <div
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+      onClick={onClose}
+    >
+      <div style={{ ...styles.card, maxWidth: 680, width: '100%', maxHeight: '85vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
+          <div style={styles.cardTitle}>
+            {employee.first_name} {employee.last_name} — licences & qualifications
+          </div>
+          <button style={styles.buttonGhost} onClick={onClose}>Close</button>
+        </div>
+        {content}
       </div>
     </div>
   )

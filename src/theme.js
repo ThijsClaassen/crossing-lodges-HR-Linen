@@ -367,4 +367,39 @@ export const css = `
   .role-badge{border-color:var(--sidebar-line);color:var(--sidebar-muted)}
   .bottom-nav,.nav-sheet{background:var(--sidebar-bg);color:var(--sidebar-text)}
   .nav-sheet-item.active{color:var(--accent-on-dark);background:var(--accent-on-dark-wash)}
+
+  /* Side drawer (2026-09-27, readability pass) — the detail pattern for an
+     employee first, everything else after. Same classes as the Ops app. */
+  .drawer-scrim{position:fixed;inset:0;background:rgba(22,32,46,.35);z-index:200}
+  .drawer{position:fixed;top:0;right:0;bottom:0;width:640px;max-width:100%;background:${colors.panel};box-shadow:var(--shadow-lg);z-index:201;display:flex;flex-direction:column;animation:drawer-in .18s ease-out}
+  @keyframes drawer-in{from{transform:translateX(24px);opacity:0}to{transform:none;opacity:1}}
+  .drawer-head{padding:18px 24px 0;border-bottom:1px solid ${colors.border}}
+  .drawer-title{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+  .drawer-title h2{margin:0;font-size:18px;font-weight:600;color:${colors.cream};font-family:'Inter',sans-serif}
+  .drawer-meta{color:${colors.muted};font-size:12.5px;margin-top:3px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .drawer-x{background:none;border:none;font-size:22px;color:${colors.muted};cursor:pointer;line-height:1;padding:0 2px}
+  .drawer-tabs{display:flex;gap:2px;margin-top:14px;overflow-x:auto}
+  .drawer-tabs button{background:none;border:none;border-bottom:2px solid transparent;padding:10px 12px;font:500 13px 'Inter',sans-serif;color:${colors.muted};cursor:pointer;margin-bottom:-1px;white-space:nowrap}
+  .drawer-tabs button.active{color:${colors.gold};border-bottom-color:${colors.gold};font-weight:600}
+  .drawer-tabs button .n{margin-left:5px;font-size:11px;color:${colors.muted};background:var(--surface-overlay);border-radius:999px;padding:1px 6px}
+  .drawer-body{flex:1;overflow:auto;padding:20px 24px}
+  .drawer-foot{padding:14px 24px;border-top:1px solid ${colors.border};display:flex;gap:10px;align-items:center;background:${colors.panel}}
+  .drawer-foot .hint{margin-left:auto;color:${colors.muted};font-size:12px}
+  .drawer-sect{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:${colors.gold};font-weight:700;margin:18px 0 10px}
+  .drawer-sect:first-child{margin-top:0}
+  .drawer-note{background:var(--accent-wash);border-radius:8px;padding:10px 12px;font-size:12.5px;color:${colors.cream};line-height:1.5}
+  .drawer-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px 16px}
+  .drawer-grid .full{grid-column:1/-1}
+  .emp-row:hover td{background:var(--accent-wash);cursor:pointer}
+  .emp-sub{display:block;color:${colors.muted};font-size:11.5px;margin-top:2px;white-space:normal}
+  .avatar{width:30px;height:30px;border-radius:50%;background:var(--accent-wash);color:${colors.gold};display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;margin-right:10px;vertical-align:middle;flex-shrink:0}
+  .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  .toolbar input,.toolbar select{background:${colors.panel};border:1px solid ${colors.border};border-radius:var(--radius-sm);padding:8px 11px;font:400 13px 'Inter',sans-serif;color:${colors.cream}}
+  .toolbar input{flex:1;min-width:180px;max-width:340px}
+  @media (max-width: 768px) {
+    .drawer{width:100%}
+    .drawer-body{padding:16px}
+    .drawer-head,.drawer-foot{padding-left:16px;padding-right:16px}
+    .drawer-grid{grid-template-columns:1fr}
+  }
 `

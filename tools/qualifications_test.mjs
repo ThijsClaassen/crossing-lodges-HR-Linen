@@ -67,7 +67,9 @@ check('dates sanity constraint', /expires_on >= issued_on/.test(sql))
 // wiring
 const app = read('src/App.jsx')
 check('App loads hr_qualifications with .catch (pre-migration safe)', /select\('hr_qualifications', \{ company_id: companyId \}[\s\S]*?\.catch\(\(\) => \[\]\)/.test(app))
-check('Employees table has a Licences column and opens the modal', /<th style=\{styles\.th\}>Licences<\/th>/.test(app) && /onSelectQualifications\?\.\(e\.id\)/.test(app))
+// 2026-09-27 (#510): the Licences column became a drawer tab; the table now
+// flags expired/expiring licences under "Needs attention" instead.
+check('Employees: Licences is a drawer tab and expiry flags reach the table', /\{ id: 'licences', label: 'Licences' \}/.test(app) && /<EmployeeQualificationsModal embedded/.test(app) && /expiryStatus\(q\) === 'expired'/.test(app))
 check('Dashboard card groups expired / coming up', /Licences & qualifications — \$\{qualUrgency\.expired\.length\} expired/.test(app))
 check('modal cleans up the uploaded file if the row insert fails', /if \(storagePath\) await removeQualificationFile/.test(app))
 check('removing a row removes its scan', /await sb\.remove\('hr_qualifications', \{ id: q\.id \}\)[\s\S]*?removeQualificationFile/.test(app))
