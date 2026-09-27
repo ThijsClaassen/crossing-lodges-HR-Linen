@@ -47,6 +47,7 @@ const tab = body('EmployeesTab')
 const ths = (tab.match(/<th /g) || []).length
 check('EmployeesTab has exactly 5 columns', ths === 5, `${ths} <th>`)
 check('"+ Add employee" is a button that opens the drawer', /\+ Add employee/.test(tab) && /setOpenId\('new'\)/.test(tab))
+check('employees are grouped by department with a header row', /className="group-row"/.test(tab) && /groups\.map\(\(g\) =>/.test(tab) && /'No department'/.test(tab))
 check('row click opens the drawer', /className="emp-row" onClick=\{\(\) => setOpenId\(e\.id\)\}/.test(tab))
 check('table has no inline status/pattern selects', !/<select[^>]*onChange=\{\(ev\) => updateEmployee/.test(tab))
 check('toolbar: search + department + lodge filters', /placeholder="Search by name/.test(tab) && /All departments/.test(tab) && /All lodges \(this week\)/.test(tab))
@@ -96,6 +97,16 @@ traverse(ast, {
   },
 })
 check('EmployeeDrawer has no hooks after a return', !earlyReturnBeforeHook)
+
+// Round 4 (2026-09-27): uniform and linen items share one table + one-screen drawer.
+check('StockItemsTable and StockItemDrawer exist', /function StockItemsTable\(/.test(src) && /function StockItemDrawer\(/.test(src))
+const sit = body('StockItemsTable'), sid = body('StockItemDrawer')
+check('stock table has 5 columns, grouped by category', (sit.slice(sit.indexOf('<thead>'), sit.indexOf('</thead>')).match(/<th /g) || []).length === 5 && /className="group-row"/.test(sit))
+check('stock item drawer is one screen: catalog fields + levels, no tabs', !/tabs=\{/.test(sid) && /Stock levels/.test(sid) && /<form id="stock-item-form" onSubmit=\{save\}>/.test(sid))
+check('drawer writes the item then upserts the stock row on the right conflict key', /sb\.insert\(table, \{ \.\.\.patch, company_id: companyId \}\)/.test(sid) && /sb\.upsert\(stockTable, payload, stockConflict\)/.test(sid) && /if \(kind === 'linen'\) payload\.location_id = location/.test(sid))
+check('Uniforms mounts it company-wide; Linen per lodge', /kind="uniform" table="hr_uniform_items" stockTable="hr_uniform_stock" stockConflict="item_id"/.test(src) && /kind="linen" table="hr_linen_items" stockTable="hr_linen_stock" stockConflict="item_id,location_id"/.test(src))
+check('old inline-input stock tables are gone', !/onBlur=\{\(e\) => saveStock\(/.test(src) && !/onBlur=\{\(e\) => saveStockField\(/.test(src))
+check('issue-an-item and log-a-movement forms untouched (staff one-screen forms)', /Issue an item/.test(src) && /Log a movement — \{location\}/.test(src))
 
 console.log(failed ? `\n${failed} check(s) failed` : '\nall employee drawer checks pass')
 process.exit(failed ? 1 : 0)

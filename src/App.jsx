@@ -3482,8 +3482,7 @@ function UniformsTab({
   onSelectEmployee,
 }) {
   const isAdmin = role === 'admin' || role === 'hradmin'
-  const [itemForm, setItemForm] = useState({ name: '', category: 'Shirt', size: '', price: '', supplier_id: '' })
-  const [savingItem, setSavingItem] = useState(false)
+  const [openItem, setOpenItem] = useState(null) // uniform item, or 'new'
   const [issueForm, setIssueForm] = useState({ item_id: '', employee_id: '' })
   const [issuing, setIssuing] = useState(false)
 
@@ -3527,43 +3526,6 @@ function UniformsTab({
       .sort((a, b) => b.totalDemand - a.totalDemand)
   }, [items, issues, employees, stockByItem])
 
-  async function addItem() {
-    if (!itemForm.name.trim()) return
-    setSavingItem(true)
-    const [row] = await sb.insert('hr_uniform_items', {
-      ...itemForm,
-      company_id: companyId,
-      price: Number(itemForm.price || 0),
-      supplier_id: itemForm.supplier_id || null,
-    })
-    setItemForm({ name: '', category: 'Shirt', size: '', price: '', supplier_id: '' })
-    setSavingItem(false)
-    onItemAdd(row)
-  }
-
-  async function updateItem(id, patch) {
-    const [row] = await sb.update('hr_uniform_items', { id }, patch)
-    onItemUpdate(row)
-  }
-
-  async function deactivateItem(id) {
-    await sb.update('hr_uniform_items', { id }, { active: false })
-    onItemRemove(id)
-  }
-
-  async function saveStock(itemId, field, value) {
-    const stock = stockByItem[itemId]
-    const payload = {
-      item_id: itemId,
-      company_id: companyId,
-      qty_on_hand: field === 'qty_on_hand' ? Number(value || 0) : stock?.qty_on_hand ?? 0,
-      min_units: field === 'min_units' ? Number(value || 0) : stock?.min_units ?? 0,
-      max_units: field === 'max_units' ? Number(value || 0) : stock?.max_units ?? 0,
-    }
-    const [row] = await sb.upsert('hr_uniform_stock', payload, 'item_id')
-    onStockChange(row)
-  }
-
   async function issueNew() {
     if (!issueForm.item_id || !issueForm.employee_id) return
     setIssuing(true)
@@ -3593,62 +3555,6 @@ function UniformsTab({
 
   return (
     <>
-      {isAdmin && (
-        <CollapsibleCard title="Add uniform item">
-          <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-            One shared pool for the whole company — add each size as its own item (e.g. "Polo Shirt"
-            size 'M' and size 'L' as two separate rows).
-          </div>
-          <div style={styles.formGrid}>
-            <div>
-              <label style={styles.label}>Name</label>
-              <input style={styles.input} value={itemForm.name} onChange={(e) => setItemForm({ ...itemForm, name: e.target.value })} />
-            </div>
-            <div>
-              <label style={styles.label}>Category</label>
-              <select style={styles.input} value={itemForm.category} onChange={(e) => setItemForm({ ...itemForm, category: e.target.value })}>
-                {UNIFORM_CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label style={styles.label}>Size</label>
-              <input style={styles.input} value={itemForm.size} onChange={(e) => setItemForm({ ...itemForm, size: e.target.value })} />
-            </div>
-            <div>
-              <label style={styles.label}>Price</label>
-              <input
-                type="number" inputMode="decimal"
-                style={styles.input}
-                value={itemForm.price}
-                onChange={(e) => setItemForm({ ...itemForm, price: e.target.value })}
-              />
-            </div>
-            <div>
-              <label style={styles.label}>Supplier</label>
-              <select
-                style={styles.input}
-                value={itemForm.supplier_id}
-                onChange={(e) => setItemForm({ ...itemForm, supplier_id: e.target.value })}
-              >
-                <option value="">No supplier</option>
-                {suppliers.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <button style={styles.button} onClick={addItem} disabled={savingItem}>
-            {savingItem ? 'Adding…' : 'Add item'}
-          </button>
-        </CollapsibleCard>
-      )}
-
       <CollapsibleCard title="Issue an item" defaultOpen>
         <div style={styles.formGrid}>
           <div>
@@ -3770,101 +3676,23 @@ function UniformsTab({
       )}
 
       {isAdmin && (
-        <CollapsibleCard title="Stock levels">
-          <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-            "On hand" changes automatically when items are issued/replaced/returned — edit it directly
-            here when new stock arrives from a supplier, or to correct a count.
-          </div>
-          <div style={styles.tableWrap}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Item</th>
-                <th style={styles.th}>Category</th>
-                <th style={styles.th}>Supplier</th>
-                <th style={styles.th}>Price</th>
-                <th style={styles.th}>On hand</th>
-                <th style={styles.th}>Value</th>
-                <th style={styles.th}>Min</th>
-                <th style={styles.th}>Max</th>
-                <th style={styles.th}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((it) => {
-                const stock = stockByItem[it.id]
-                const value = Number(it.price || 0) * Number(stock?.qty_on_hand ?? 0)
-                return (
-                  <tr key={it.id}>
-                    <td style={styles.td}>
-                      {it.name} {it.size ? `(${it.size})` : ''}
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        style={{ ...styles.smallInput, width: 90 }}
-                        defaultValue={it.category}
-                        onBlur={(e) => updateItem(it.id, { category: e.target.value })}
-                      />
-                    </td>
-                    <td style={styles.td}>
-                      <select
-                        style={styles.smallInput}
-                        defaultValue={it.supplier_id || ''}
-                        onChange={(e) => updateItem(it.id, { supplier_id: e.target.value || null })}
-                      >
-                        <option value="">No supplier</option>
-                        {suppliers.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.name}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        type="number" inputMode="decimal"
-                        style={styles.smallInput}
-                        defaultValue={it.price ?? 0}
-                        onBlur={(e) => updateItem(it.id, { price: Number(e.target.value) || 0 })}
-                      />
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        type="number" inputMode="decimal"
-                        style={styles.smallInput}
-                        defaultValue={stock?.qty_on_hand ?? 0}
-                        onBlur={(e) => saveStock(it.id, 'qty_on_hand', e.target.value)}
-                      />
-                    </td>
-                    <td style={styles.tdNum}>R {fmt(value)}</td>
-                    <td style={styles.td}>
-                      <input
-                        type="number" inputMode="decimal"
-                        style={styles.smallInput}
-                        defaultValue={stock?.min_units ?? 0}
-                        onBlur={(e) => saveStock(it.id, 'min_units', e.target.value)}
-                      />
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        type="number" inputMode="decimal"
-                        style={styles.smallInput}
-                        defaultValue={stock?.max_units ?? 0}
-                        onBlur={(e) => saveStock(it.id, 'max_units', e.target.value)}
-                      />
-                    </td>
-                    <td style={styles.td}>
-                      <button style={styles.buttonDanger} onClick={() => deactivateItem(it.id)}>
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-          </div>
-        </CollapsibleCard>
+        <StockItemsTable kind="uniform" items={items} stockByItem={stockByItem} suppliers={suppliers} isAdmin={isAdmin}
+          onOpen={(it) => setOpenItem(it)} onAdd={() => setOpenItem('new')} />
+      )}
+      {isAdmin && openItem && (
+        <StockItemDrawer
+          key={openItem === 'new' ? 'new' : openItem.id}
+          kind="uniform" table="hr_uniform_items" stockTable="hr_uniform_stock" stockConflict="item_id"
+          item={openItem === 'new' ? null : items.find((x) => x.id === openItem.id) || openItem}
+          stock={openItem === 'new' ? null : stockByItem[openItem.id]}
+          companyId={companyId}
+          categoryOptions={Array.from(new Set([...UNIFORM_CATEGORIES, ...items.map((x) => x.category).filter(Boolean)]))}
+          suppliers={suppliers}
+          onSaved={(row, isNew) => { if (isNew) { onItemAdd(row); setOpenItem(row) } else onItemUpdate(row) }}
+          onStockSaved={onStockChange}
+          onDeactivated={(id) => { onItemRemove(id); setOpenItem(null) }}
+          onClose={() => setOpenItem(null)}
+        />
       )}
     </>
   )
@@ -3895,30 +3723,17 @@ function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemA
     // the Ops app crashed on the new tenant: locId stayed 'ZC', locData had
     // no such key, and the dashboard read loc.dieselIssues off undefined.
   }, [companyId, location, companyLoading])
-  const [itemForm, setItemForm] = useState({ name: '', category: 'Towels', size: '', price: '', supplier_id: '' })
-  const [savingItem, setSavingItem] = useState(false)
+  const [openItem, setOpenItem] = useState(null) // linen item, or 'new'
   const [moveForm, setMoveForm] = useState({ item_id: '', qty: '', reason: 'Received', note: '' })
   const [logging, setLogging] = useState(false)
-  const [addingCategory, setAddingCategory] = useState(false)
-  const [newCategoryText, setNewCategoryText] = useState('')
 
-  // Starter categories plus whatever's already in use on real items (so a
-  // category someone typed in last week shows up as a normal dropdown
-  // choice from then on) — always includes whatever's currently selected
-  // so the dropdown never shows blank right after adding a new one.
+  // Starter categories plus whatever's already in use on real items, so a
+  // category someone typed in last week is a normal dropdown choice.
   const categoryOptions = useMemo(() => {
     const set = new Set(LINEN_CATEGORIES)
     for (const it of items) if (it.category) set.add(it.category)
-    if (itemForm.category) set.add(itemForm.category)
     return Array.from(set).sort()
-  }, [items, itemForm.category])
-
-  function confirmNewCategory() {
-    const v = newCategoryText.trim()
-    if (v) setItemForm((f) => ({ ...f, category: v }))
-    setAddingCategory(false)
-    setNewCategoryText('')
-  }
+  }, [items])
 
   const stockByItem = useMemo(() => {
     const map = {}
@@ -3927,44 +3742,6 @@ function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemA
   }, [stock, location])
 
   const locationMovements = useMemo(() => movements.filter((m) => m.location_id === location), [movements, location])
-
-  async function addItem() {
-    if (!itemForm.name.trim()) return
-    setSavingItem(true)
-    const [row] = await sb.insert('hr_linen_items', {
-      ...itemForm,
-      company_id: companyId,
-      price: Number(itemForm.price || 0),
-      supplier_id: itemForm.supplier_id || null,
-    })
-    setItemForm({ name: '', category: 'Towels', size: '', price: '', supplier_id: '' })
-    setSavingItem(false)
-    onItemAdd(row)
-  }
-
-  async function updateItem(id, patch) {
-    const [row] = await sb.update('hr_linen_items', { id }, patch)
-    onItemUpdate(row)
-  }
-
-  async function deactivateItem(id) {
-    await sb.update('hr_linen_items', { id }, { active: false })
-    onItemRemove(id)
-  }
-
-  async function saveStockField(itemId, field, value) {
-    const s = stockByItem[itemId]
-    const payload = {
-      item_id: itemId,
-      location_id: location,
-      company_id: companyId,
-      qty_on_hand: field === 'qty_on_hand' ? Number(value || 0) : s?.qty_on_hand ?? 0,
-      min_units: field === 'min_units' ? Number(value || 0) : s?.min_units ?? 0,
-      max_units: field === 'max_units' ? Number(value || 0) : s?.max_units ?? 0,
-    }
-    const [row] = await sb.upsert('hr_linen_stock', payload, 'item_id,location_id')
-    onStockChange(row)
-  }
 
   async function logMovement() {
     if (!moveForm.item_id || !moveForm.qty) return
@@ -4019,101 +3796,6 @@ function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemA
           ))}
         </div>
       </div>
-
-      {isAdmin && (
-        <div style={styles.card}>
-          <div style={styles.cardTitle}>Add linen item</div>
-          <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-            Shared catalog across all lodges — add each size as its own item (e.g. "Duvet Cover" size
-            'Queen' and size 'King' as two separate rows). Leave size blank if it doesn't apply.
-          </div>
-          <div style={styles.formGrid}>
-            <div>
-              <label style={styles.label}>Name</label>
-              <input style={styles.input} value={itemForm.name} onChange={(e) => setItemForm({ ...itemForm, name: e.target.value })} />
-            </div>
-            <div>
-              <label style={styles.label}>Category</label>
-              {addingCategory ? (
-                <div style={{ ...styles.row, gap: 4 }}>
-                  <input
-                    autoFocus
-                    style={styles.input}
-                    placeholder="New category name"
-                    value={newCategoryText}
-                    onChange={(e) => setNewCategoryText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        confirmNewCategory()
-                      }
-                    }}
-                  />
-                  <button style={styles.buttonGhost} onClick={confirmNewCategory}>
-                    Use
-                  </button>
-                  <button
-                    style={styles.buttonGhost}
-                    onClick={() => {
-                      setAddingCategory(false)
-                      setNewCategoryText('')
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              ) : (
-                <select
-                  style={styles.input}
-                  value={itemForm.category}
-                  onChange={(e) => {
-                    if (e.target.value === '__new__') setAddingCategory(true)
-                    else setItemForm({ ...itemForm, category: e.target.value })
-                  }}
-                >
-                  {categoryOptions.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                  <option value="__new__">+ Add new category…</option>
-                </select>
-              )}
-            </div>
-            <div>
-              <label style={styles.label}>Size (optional)</label>
-              <input style={styles.input} value={itemForm.size} onChange={(e) => setItemForm({ ...itemForm, size: e.target.value })} />
-            </div>
-            <div>
-              <label style={styles.label}>Price</label>
-              <input
-                type="number" inputMode="decimal"
-                style={styles.input}
-                value={itemForm.price}
-                onChange={(e) => setItemForm({ ...itemForm, price: e.target.value })}
-              />
-            </div>
-            <div>
-              <label style={styles.label}>Supplier</label>
-              <select
-                style={styles.input}
-                value={itemForm.supplier_id}
-                onChange={(e) => setItemForm({ ...itemForm, supplier_id: e.target.value })}
-              >
-                <option value="">No supplier</option>
-                {suppliers.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <button style={styles.button} onClick={addItem} disabled={savingItem}>
-            {savingItem ? 'Adding…' : 'Add item'}
-          </button>
-        </div>
-      )}
 
       <div style={styles.card}>
         <div style={styles.cardTitle}>Log a movement — {location}</div>
@@ -4194,100 +3876,220 @@ function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemA
       </div>
 
       {isAdmin && (
-        <div style={styles.card}>
-          <div style={styles.cardTitle}>Stock levels — {location}</div>
-          <div style={styles.tableWrap}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Item</th>
-                <th style={styles.th}>Category</th>
-                <th style={styles.th}>Supplier</th>
-                <th style={styles.th}>Price</th>
-                <th style={styles.th}>On hand</th>
-                <th style={styles.th}>Value</th>
-                <th style={styles.th}>Min</th>
-                <th style={styles.th}>Max</th>
-                <th style={styles.th}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((it) => {
-                const s = stockByItem[it.id]
-                const value = Number(it.price || 0) * Number(s?.qty_on_hand ?? 0)
-                return (
-                  <tr key={it.id}>
-                    <td style={styles.td}>
-                      {it.name} {it.size ? `(${it.size})` : ''}
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        style={{ ...styles.smallInput, width: 100 }}
-                        defaultValue={it.category}
-                        onBlur={(e) => updateItem(it.id, { category: e.target.value })}
-                      />
-                    </td>
-                    <td style={styles.td}>
-                      <select
-                        style={styles.smallInput}
-                        defaultValue={it.supplier_id || ''}
-                        onChange={(e) => updateItem(it.id, { supplier_id: e.target.value || null })}
-                      >
-                        <option value="">No supplier</option>
-                        {suppliers.map((s2) => (
-                          <option key={s2.id} value={s2.id}>
-                            {s2.name}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        type="number" inputMode="decimal"
-                        style={styles.smallInput}
-                        defaultValue={it.price ?? 0}
-                        onBlur={(e) => updateItem(it.id, { price: Number(e.target.value) || 0 })}
-                      />
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        type="number" inputMode="decimal"
-                        style={styles.smallInput}
-                        defaultValue={s?.qty_on_hand ?? 0}
-                        onBlur={(e) => saveStockField(it.id, 'qty_on_hand', e.target.value)}
-                      />
-                    </td>
-                    <td style={styles.tdNum}>R {fmt(value)}</td>
-                    <td style={styles.td}>
-                      <input
-                        type="number" inputMode="decimal"
-                        style={styles.smallInput}
-                        defaultValue={s?.min_units ?? 0}
-                        onBlur={(e) => saveStockField(it.id, 'min_units', e.target.value)}
-                      />
-                    </td>
-                    <td style={styles.td}>
-                      <input
-                        type="number" inputMode="decimal"
-                        style={styles.smallInput}
-                        defaultValue={s?.max_units ?? 0}
-                        onBlur={(e) => saveStockField(it.id, 'max_units', e.target.value)}
-                      />
-                    </td>
-                    <td style={styles.td}>
-                      <button style={styles.buttonDanger} onClick={() => deactivateItem(it.id)}>
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-          </div>
-        </div>
+        <StockItemsTable kind="linen" items={items} stockByItem={stockByItem} suppliers={suppliers} location={location} isAdmin={isAdmin}
+          onOpen={(it) => setOpenItem(it)} onAdd={() => setOpenItem('new')} />
+      )}
+      {isAdmin && openItem && (
+        <StockItemDrawer
+          key={`${openItem === 'new' ? 'new' : openItem.id}|${location}`}
+          kind="linen" table="hr_linen_items" stockTable="hr_linen_stock" stockConflict="item_id,location_id"
+          item={openItem === 'new' ? null : items.find((x) => x.id === openItem.id) || openItem}
+          stock={openItem === 'new' ? null : stockByItem[openItem.id]}
+          location={location}
+          companyId={companyId}
+          categoryOptions={categoryOptions}
+          suppliers={suppliers}
+          onSaved={(row, isNew) => { if (isNew) { onItemAdd(row); setOpenItem(row) } else onItemUpdate(row) }}
+          onStockSaved={onStockChange}
+          onDeactivated={(id) => { onItemRemove(id); setOpenItem(null) }}
+          onClose={() => setOpenItem(null)}
+        />
       )}
     </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Stock items (uniforms and linen) — readability pass (2026-09-27). One
+// grouped-by-category table for the catalog + stock, one drawer per item
+// with the catalog fields and the stock levels on ONE screen. Replaces the
+// "Add … item" form card and the every-cell-an-input "Stock levels" table
+// in both tabs. `kind` is 'uniform' (one company-wide stock row per item)
+// or 'linen' (one stock row per item per lodge — `location` says which).
+// ---------------------------------------------------------------------------
+function StockItemsTable({ kind, items, stockByItem, suppliers, location, isAdmin, onOpen, onAdd }) {
+  const [search, setSearch] = useState('')
+  const [catFilter, setCatFilter] = useState('')
+  const [flag, setFlag] = useState('')
+  const supplierName = (id) => suppliers.find((s) => s.id === id)?.name || null
+  const categories = useMemo(() => Array.from(new Set(items.map((it) => it.category).filter(Boolean))).sort(), [items])
+  const q = search.trim().toLowerCase()
+  const rows = items
+    .map((it) => {
+      const stock = stockByItem[it.id]
+      const onHand = Number(stock?.qty_on_hand ?? 0)
+      const min = Number(stock?.min_units ?? 0)
+      return { it, stock, onHand, min, max: Number(stock?.max_units ?? 0), value: Number(it.price || 0) * onHand, low: min > 0 && onHand <= min }
+    })
+    .filter((r) => !q || `${r.it.name} ${r.it.size || ''} ${supplierName(r.it.supplier_id) || ''}`.toLowerCase().includes(q))
+    .filter((r) => !catFilter || r.it.category === catFilter)
+    .filter((r) => !flag || (flag === 'low' ? r.low : !r.it.supplier_id))
+    .sort((a, b) => (a.it.category || '').localeCompare(b.it.category || '') || a.it.name.localeCompare(b.it.name) || String(a.it.size || '').localeCompare(String(b.it.size || ''), undefined, { numeric: true }))
+  const groups = []
+  for (const r of rows) {
+    const key = r.it.category || 'Uncategorised'
+    let g = groups[groups.length - 1]
+    if (!g || g.key !== key) { g = { key, rows: [], value: 0, low: 0 }; groups.push(g) }
+    g.rows.push(r); g.value += r.value; if (r.low) g.low++
+  }
+  const lowCount = rows.filter((r) => r.low).length
+  const totalValue = rows.reduce((s, r) => s + r.value, 0)
+  return (
+    <div style={styles.card}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, marginBottom: 10 }}>
+        <div>
+          <div style={styles.cardTitle}>Stock{kind === 'linen' && location ? ` — ${location}` : ''}</div>
+          <div style={{ fontSize: 12, color: colors.muted }}>{items.length} item{items.length === 1 ? '' : 's'} · R {fmt(totalValue)} on the shelf{lowCount ? ` · ${lowCount} at or below minimum` : ''}</div>
+        </div>
+        {isAdmin && <button style={{ ...styles.button, marginLeft: 'auto' }} onClick={onAdd}>+ Add {kind} item</button>}
+      </div>
+      <div className="toolbar">
+        <input placeholder="Search item, size or supplier…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <select value={catFilter} onChange={(e) => setCatFilter(e.target.value)}>
+          <option value="">All categories</option>
+          {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <select value={flag} onChange={(e) => setFlag(e.target.value)}>
+          <option value="">Everything</option>
+          <option value="low">At or below minimum</option>
+          <option value="nosupplier">No supplier</option>
+        </select>
+      </div>
+      <div style={styles.tableWrap}>
+        <table style={styles.table}>
+          <thead>
+            <tr>
+              <th style={styles.th}>Item</th>
+              <th style={styles.th}>On hand</th>
+              <th style={{ ...styles.th, textAlign: 'right' }}>Price</th>
+              <th style={{ ...styles.th, textAlign: 'right' }}>Value</th>
+              <th style={styles.th}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map((g) => (
+              <Fragment key={g.key}>
+                <tr className="group-row">
+                  <td style={styles.td} colSpan={3}><strong>{g.key}</strong> <span style={{ color: colors.muted, fontSize: 12 }}>({g.rows.length}{g.low ? ` · ${g.low} low` : ''})</span></td>
+                  <td style={styles.tdNum}><strong>R {fmt(g.value)}</strong></td>
+                  <td style={styles.td} />
+                </tr>
+                {g.rows.map(({ it, onHand, min, max, value, low }) => {
+                  const pct = max > 0 ? Math.min(100, Math.max(0, (onHand / max) * 100)) : min > 0 ? Math.min(100, (onHand / (min * 2)) * 100) : 100
+                  return (
+                    <tr key={it.id} className="emp-row" onClick={() => onOpen(it)}>
+                      <td style={{ ...styles.td, whiteSpace: 'normal' }}>
+                        <strong>{it.name}{it.size ? ` — ${it.size}` : ''}</strong>
+                        <span className="emp-sub">{supplierName(it.supplier_id) || 'no supplier'}</span>
+                      </td>
+                      <td style={styles.td}>
+                        <span className={`lvl${low ? ' low' : ''}`}>
+                          <span className="bar"><i style={{ width: `${pct}%` }} /></span>
+                          <span>{fmt(onHand, 0)}{min > 0 ? ` / min ${fmt(min, 0)}` : ''}</span>
+                          {low && <span style={styles.badge('bad')}>Low</span>}
+                        </span>
+                      </td>
+                      <td style={styles.tdNum}>R {fmt(it.price || 0)}</td>
+                      <td style={styles.tdNum}>R {fmt(value)}</td>
+                      <td style={{ ...styles.td, textAlign: 'right' }}><button style={styles.buttonGhost} onClick={(ev) => { ev.stopPropagation(); onOpen(it) }}>Open</button></td>
+                    </tr>
+                  )
+                })}
+              </Fragment>
+            ))}
+            {rows.length === 0 && <tr><td style={styles.td} colSpan={5}>{items.length === 0 ? `No ${kind} items yet — add one with the button above.` : 'Nothing matches those filters.'}</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 11, color: colors.muted, marginTop: 8 }}>
+        {kind === 'uniform' ? '"On hand" moves by itself when items are issued, replaced or returned; ' : ''}Price, supplier, min/max and a stock correction are in the item panel — click a row.
+      </div>
+    </div>
+  )
+}
+
+function StockItemDrawer({ kind, table, stockTable, stockConflict, item, stock, location, companyId, categoryOptions, suppliers, onSaved, onStockSaved, onDeactivated, onClose }) {
+  const isNew = !item
+  const blank = { name: '', category: categoryOptions[0] || '', size: '', price: '', supplier_id: '' }
+  const [form, setForm] = useState(() => isNew ? blank : { name: item.name || '', category: item.category || '', size: item.size || '', price: item.price ?? '', supplier_id: item.supplier_id || '' })
+  const [levels, setLevels] = useState({ qty_on_hand: stock?.qty_on_hand ?? 0, min_units: stock?.min_units ?? 0, max_units: stock?.max_units ?? 0 })
+  const [newCategory, setNewCategory] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState('')
+  const f = (k) => (e) => setForm((x) => ({ ...x, [k]: e.target.value }))
+  const l = (k) => (e) => setLevels((x) => ({ ...x, [k]: e.target.value }))
+  const itemDirty = isNew || ['name', 'category', 'size', 'supplier_id'].some((k) => String(form[k] ?? '') !== String(item[k] ?? '')) || Number(form.price || 0) !== Number(item.price || 0)
+  const levelsDirty = ['qty_on_hand', 'min_units', 'max_units'].some((k) => Number(levels[k] || 0) !== Number(stock?.[k] ?? 0))
+  const dirty = itemDirty || levelsDirty
+  const cats = Array.from(new Set([...categoryOptions, form.category].filter(Boolean))).sort()
+
+  async function save(e) {
+    e.preventDefault()
+    if (!form.name.trim()) { setMsg('Give the item a name.'); return }
+    setSaving(true); setMsg('')
+    try {
+      const patch = { name: form.name.trim(), category: form.category.trim() || null, size: form.size.trim() || null, price: Number(form.price || 0), supplier_id: form.supplier_id || null }
+      let row = item
+      if (isNew) { ;[row] = await sb.insert(table, { ...patch, company_id: companyId }); onSaved(row, true) }
+      else if (itemDirty) { ;[row] = await sb.update(table, { id: item.id }, patch); onSaved(row, false) }
+      if (levelsDirty || isNew) {
+        const payload = { item_id: row.id, company_id: companyId, qty_on_hand: Number(levels.qty_on_hand || 0), min_units: Number(levels.min_units || 0), max_units: Number(levels.max_units || 0) }
+        if (kind === 'linen') payload.location_id = location
+        const [stockRow] = await sb.upsert(stockTable, payload, stockConflict)
+        onStockSaved(stockRow)
+      }
+      setMsg(isNew ? 'Added.' : 'Saved.')
+    } catch (err) { setMsg(err.message) } finally { setSaving(false) }
+  }
+  async function deactivate() {
+    if (!window.confirm(`Remove ${item.name}${item.size ? ` (${item.size})` : ''} from the ${kind} list? Its history stays.`)) return
+    await sb.update(table, { id: item.id }, { active: false })
+    onDeactivated(item.id)
+  }
+
+  const onHand = Number(levels.qty_on_hand || 0)
+  return (
+    <Drawer title={isNew ? `New ${kind} item` : `${item.name}${item.size ? ` — ${item.size}` : ''}`}
+      meta={isNew ? 'Add each size as its own item (e.g. Polo Shirt M and Polo Shirt L as two rows).' : `${item.category || 'Uncategorised'}${kind === 'linen' ? ` · stock at ${location}` : ' · company-wide stock'}`}
+      onClose={onClose}
+      footer={<>
+        <button type="submit" form="stock-item-form" style={styles.button} disabled={saving || !dirty}>{saving ? 'Saving…' : isNew ? 'Add item' : 'Save changes'}</button>
+        <button type="button" style={styles.buttonGhost} onClick={onClose}>{dirty && !isNew ? 'Cancel' : 'Close'}</button>
+        {!isNew && <button type="button" style={styles.buttonDanger} onClick={deactivate}>Deactivate</button>}
+        <span className="hint">{msg || (dirty && !isNew ? 'Unsaved changes' : 'Esc closes')}</span>
+      </>}>
+      <form id="stock-item-form" onSubmit={save}>
+        <div className="drawer-grid">
+          <div className="field full"><label style={styles.label}>Name</label><input style={styles.input} value={form.name} onChange={f('name')} autoFocus={isNew} /></div>
+          <div className="field"><label style={styles.label}>Category</label>
+            {newCategory ? (
+              <input style={styles.input} autoFocus placeholder="New category" value={form.category} onChange={f('category')} onBlur={() => setNewCategory(false)} />
+            ) : (
+              <select style={styles.input} value={form.category} onChange={(e) => { if (e.target.value === '__new') { setForm((x) => ({ ...x, category: '' })); setNewCategory(true) } else setForm((x) => ({ ...x, category: e.target.value })) }}>
+                {cats.map((c) => <option key={c} value={c}>{c}</option>)}
+                <option value="__new">+ New category…</option>
+              </select>
+            )}
+          </div>
+          <div className="field"><label style={styles.label}>Size{kind === 'linen' ? ' (optional)' : ''}</label><input style={styles.input} value={form.size} onChange={f('size')} placeholder={kind === 'linen' ? 'e.g. Queen' : 'e.g. M'} /></div>
+          <div className="field"><label style={styles.label}>Price (R)</label><input type="number" inputMode="decimal" step="0.01" min="0" style={styles.input} value={form.price} onChange={f('price')} /></div>
+          <div className="field"><label style={styles.label}>Supplier</label>
+            <select style={styles.input} value={form.supplier_id} onChange={f('supplier_id')}>
+              <option value="">No supplier</option>
+              {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="drawer-sect">Stock levels{kind === 'linen' ? ` — ${location}` : ''}</div>
+        <div className="drawer-grid">
+          <div className="field"><label style={styles.label}>On hand</label><input type="number" inputMode="decimal" style={styles.input} value={levels.qty_on_hand} onChange={l('qty_on_hand')} />
+            <div className="help">{kind === 'uniform' ? 'Moves by itself on issue / replace / return. Type here only when stock arrives or to correct a count.' : 'Moves by itself with each logged movement. Type here only to correct a count.'}</div></div>
+          <div className="field"><label style={styles.label}>Value</label><input style={styles.input} disabled value={`R ${fmt(Number(form.price || 0) * onHand)}`} /></div>
+          <div className="field"><label style={styles.label}>Minimum</label><input type="number" inputMode="decimal" style={styles.input} value={levels.min_units} onChange={l('min_units')} /><div className="help">At or below this it shows on Orders.</div></div>
+          <div className="field"><label style={styles.label}>Maximum</label><input type="number" inputMode="decimal" style={styles.input} value={levels.max_units} onChange={l('max_units')} /><div className="help">Orders top up to this.</div></div>
+        </div>
+      </form>
+    </Drawer>
   )
 }
 
