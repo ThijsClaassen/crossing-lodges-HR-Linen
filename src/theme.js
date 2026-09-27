@@ -393,6 +393,9 @@ export const css = `
   .emp-row:hover td{background:var(--accent-wash);cursor:pointer}
   .emp-sub{display:block;color:${colors.muted};font-size:11.5px;margin-top:2px;white-space:normal}
   .avatar{width:30px;height:30px;border-radius:50%;background:var(--accent-wash);color:${colors.gold};display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;margin-right:10px;vertical-align:middle;flex-shrink:0}
+  .drawer-stat{display:flex;justify-content:space-between;font-size:13px;padding:6px 0;border-bottom:1px solid ${colors.border};gap:12px}
+  .drawer-stat b{color:${colors.cream}}
+  .field .help{font-size:11.5px;color:${colors.muted};margin-top:5px;line-height:1.45}
   .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
   .toolbar input,.toolbar select{background:${colors.panel};border:1px solid ${colors.border};border-radius:var(--radius-sm);padding:8px 11px;font:400 13px 'Inter',sans-serif;color:${colors.cream}}
   .toolbar input{flex:1;min-width:180px;max-width:340px}

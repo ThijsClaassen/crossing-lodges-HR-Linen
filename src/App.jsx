@@ -1135,6 +1135,10 @@ function AuthenticatedApp() {
                 onAdd={addLocalSupplier}
                 onUpdate={updateLocalSupplier}
                 onRemove={removeLocalSupplier}
+                uniformItems={uniformItems}
+                uniformStockByItem={uniformStockByItem}
+                linenItems={linenItems}
+                linenStock={linenStock}
               />
             )}
             {activeTab === 'orders' && (role === 'admin' || role === 'hradmin') && (
@@ -4271,129 +4275,175 @@ function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemA
 // and Linen.
 // ---------------------------------------------------------------------------
 
-function SuppliersTab({ companyId, suppliers, onAdd, onUpdate, onRemove }) {
-  const [form, setForm] = useState({ name: '', contact_name: '', phone: '', email: '', notes: '' })
-  const [saving, setSaving] = useState(false)
+// Suppliers — readability pass (2026-09-27): the table says who they are and
+// what they supply (uniform and linen items linked by supplier_id) and what
+// is low; contact details are edited in the supplier drawer, which also
+// lists the items with the same "Copy order list" the Orders tab builds.
+function SuppliersTab({ companyId, suppliers, onAdd, onUpdate, onRemove, uniformItems = [], uniformStockByItem = {}, linenItems = [], linenStock = [] }) {
+  const [search, setSearch] = useState('')
+  const [kind, setKind] = useState('')
+  const [openId, setOpenId] = useState(null) // supplier id, or 'new'
 
-  async function addSupplier() {
-    if (!form.name.trim()) return
-    setSaving(true)
-    const [row] = await sb.insert('hr_suppliers', { ...form, company_id: companyId })
-    setForm({ name: '', contact_name: '', phone: '', email: '', notes: '' })
-    setSaving(false)
-    onAdd(row)
-  }
+  const bySupplier = useMemo(() => {
+    const map = {}
+    const add = (sid, row) => { if (!sid) return; (map[sid] = map[sid] || { uniforms: [], linen: [], low: 0 }); row.kind === 'Uniform' ? map[sid].uniforms.push(row) : map[sid].linen.push(row); if (row.low) map[sid].low++ }
+    for (const it of uniformItems) { const stock = uniformStockByItem[it.id]; add(it.supplier_id, { kind: 'Uniform', item: it, stock, label: `${it.name}${it.size ? ` — ${it.size}` : ''}`, low: !!stock && Number(stock.qty_on_hand) <= Number(stock.min_units) }) }
+    const linenById = Object.fromEntries(linenItems.map((it) => [it.id, it]))
+    for (const s of linenStock) { const it = linenById[s.item_id]; if (!it) continue; add(it.supplier_id, { kind: 'Linen', item: it, stock: s, label: `${it.name} — ${s.location_id}`, low: Number(s.qty_on_hand) <= Number(s.min_units) }) }
+    return map
+  }, [uniformItems, uniformStockByItem, linenItems, linenStock])
 
-  async function updateSupplier(id, patch) {
-    const [row] = await sb.update('hr_suppliers', { id }, patch)
-    onUpdate(row)
-  }
-
-  async function deactivate(id) {
-    await sb.update('hr_suppliers', { id }, { active: false })
-    onRemove(id)
-  }
+  const q = search.trim().toLowerCase()
+  const rows = suppliers
+    .filter((s) => !q || `${s.name} ${s.contact_name || ''} ${s.email || ''}`.toLowerCase().includes(q))
+    .filter((s) => !kind || (kind === 'uniform' ? (bySupplier[s.id]?.uniforms.length || 0) > 0 : (bySupplier[s.id]?.linen.length || 0) > 0))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const lowCount = suppliers.filter((s) => (bySupplier[s.id]?.low || 0) > 0).length
+  const openSupplier = openId && openId !== 'new' ? suppliers.find((s) => s.id === openId) : null
 
   return (
     <>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, marginBottom: 12 }}>
+        <div style={{ fontSize: 13, color: colors.muted }}>{suppliers.length} supplier{suppliers.length === 1 ? '' : 's'}{lowCount ? ` · ${lowCount} with items below minimum` : ''}</div>
+        <button style={{ ...styles.button, marginLeft: 'auto' }} onClick={() => setOpenId('new')}>+ Add supplier</button>
+      </div>
+      <div className="toolbar">
+        <input placeholder="Search supplier or contact…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <select value={kind} onChange={(e) => setKind(e.target.value)}>
+          <option value="">All</option>
+          <option value="uniform">Uniforms</option>
+          <option value="linen">Linen</option>
+        </select>
+      </div>
       <div style={styles.card}>
-        <div style={styles.cardTitle}>Add supplier</div>
-        <div style={styles.formGrid}>
-          <div>
-            <label style={styles.label}>Name</label>
-            <input style={styles.input} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-          </div>
-          <div>
-            <label style={styles.label}>Contact name</label>
-            <input
-              style={styles.input}
-              value={form.contact_name}
-              onChange={(e) => setForm({ ...form, contact_name: e.target.value })}
-            />
-          </div>
-          <div>
-            <label style={styles.label}>Phone</label>
-            <input style={styles.input} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
-          </div>
-          <div>
-            <label style={styles.label}>Email</label>
-            <input style={styles.input} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
-          </div>
-          <div>
-            <label style={styles.label}>Notes</label>
-            <input style={styles.input} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-          </div>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Supplier</th>
+                <th style={styles.th}>Contact</th>
+                <th style={styles.th}>Supplies</th>
+                <th style={styles.th}>To order</th>
+                <th style={styles.th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((s) => {
+                const g = bySupplier[s.id]
+                const supplies = [g?.uniforms.length ? `${g.uniforms.length} uniform item${g.uniforms.length === 1 ? '' : 's'}` : null, g?.linen.length ? `${g.linen.length} linen line${g.linen.length === 1 ? '' : 's'}` : null].filter(Boolean).join(' · ')
+                return (
+                  <tr key={s.id} className="emp-row" onClick={() => setOpenId(s.id)}>
+                    <td style={{ ...styles.td, whiteSpace: 'normal' }}><strong>{s.name}</strong>{s.notes ? <span className="emp-sub">{s.notes}</span> : null}</td>
+                    <td style={{ ...styles.td, whiteSpace: 'normal' }}>{[s.contact_name, s.phone].filter(Boolean).join(' · ') || '—'}{s.email ? <span className="emp-sub">{s.email}</span> : null}</td>
+                    <td style={styles.td}>{supplies || <span style={{ color: colors.muted }}>no items linked</span>}</td>
+                    <td style={styles.td}>{g?.low ? <span style={styles.badge('bad')}>{g.low} item{g.low === 1 ? '' : 's'} low</span> : null}</td>
+                    <td style={{ ...styles.td, textAlign: 'right' }}><button style={styles.buttonGhost} onClick={(ev) => { ev.stopPropagation(); setOpenId(s.id) }}>Open</button></td>
+                  </tr>
+                )
+              })}
+              {rows.length === 0 && <tr><td style={styles.td} colSpan={5}>{suppliers.length === 0 ? 'No suppliers yet — add one with the button above, then link uniform and linen items to it.' : 'Nobody matches that search.'}</td></tr>}
+            </tbody>
+          </table>
         </div>
-        <button style={styles.button} onClick={addSupplier} disabled={saving}>
-          {saving ? 'Adding…' : 'Add supplier'}
-        </button>
       </div>
 
-      <div style={styles.card}>
-        <div style={styles.cardTitle}>{suppliers.length} suppliers</div>
-        <div style={styles.tableWrap}>
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Name</th>
-              <th style={styles.th}>Contact</th>
-              <th style={styles.th}>Phone</th>
-              <th style={styles.th}>Email</th>
-              <th style={styles.th}>Notes</th>
-              <th style={styles.th}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {suppliers.map((s) => (
-              <tr key={s.id}>
-                <td style={styles.td}>{s.name}</td>
-                <td style={styles.td}>
-                  <input
-                    style={{ ...styles.smallInput, width: 130 }}
-                    defaultValue={s.contact_name || ''}
-                    onBlur={(e) => updateSupplier(s.id, { contact_name: e.target.value })}
-                  />
-                </td>
-                <td style={styles.td}>
-                  <input
-                    style={{ ...styles.smallInput, width: 110 }}
-                    defaultValue={s.phone || ''}
-                    onBlur={(e) => updateSupplier(s.id, { phone: e.target.value })}
-                  />
-                </td>
-                <td style={styles.td}>
-                  <input
-                    style={{ ...styles.smallInput, width: 160 }}
-                    defaultValue={s.email || ''}
-                    onBlur={(e) => updateSupplier(s.id, { email: e.target.value })}
-                  />
-                </td>
-                <td style={styles.td}>
-                  <input
-                    style={{ ...styles.smallInput, width: 160 }}
-                    defaultValue={s.notes || ''}
-                    onBlur={(e) => updateSupplier(s.id, { notes: e.target.value })}
-                  />
-                </td>
-                <td style={styles.td}>
-                  <button style={styles.buttonDanger} onClick={() => deactivate(s.id)}>
-                    Remove
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {suppliers.length === 0 && (
-              <tr>
-                <td style={styles.td} colSpan={6}>
-                  No suppliers yet — add one above, then link uniform/linen items to it.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-        </div>
-      </div>
+      {(openId === 'new' || openSupplier) && (
+        <SupplierDrawer
+          key={openId}
+          companyId={companyId}
+          supplier={openSupplier}
+          group={openSupplier ? bySupplier[openSupplier.id] : null}
+          onAdd={(row) => { onAdd(row); setOpenId(row.id) }}
+          onUpdate={onUpdate}
+          onRemove={(id) => { onRemove(id); setOpenId(null) }}
+          onClose={() => setOpenId(null)}
+        />
+      )}
     </>
+  )
+}
+
+const BLANK_SUPPLIER = { name: '', contact_name: '', phone: '', email: '', notes: '' }
+
+function SupplierDrawer({ companyId, supplier, group, onAdd, onUpdate, onRemove, onClose }) {
+  const isNew = !supplier
+  const [tab, setTab] = useState('details')
+  const [form, setForm] = useState(() => isNew ? BLANK_SUPPLIER : { name: supplier.name || '', contact_name: supplier.contact_name || '', phone: supplier.phone || '', email: supplier.email || '', notes: supplier.notes || '' })
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [copied, setCopied] = useState(false)
+  const f = (k) => (e) => setForm((x) => ({ ...x, [k]: e.target.value }))
+  const dirty = isNew || Object.keys(BLANK_SUPPLIER).some((k) => (form[k] || '') !== (supplier[k] || ''))
+  const items = group ? [...group.uniforms, ...group.linen] : []
+  const toOrder = items.filter((r) => r.low)
+
+  async function save(e) {
+    e.preventDefault()
+    if (!form.name.trim()) return
+    setSaving(true); setMsg('')
+    try {
+      const patch = { name: form.name.trim(), contact_name: form.contact_name.trim() || null, phone: form.phone.trim() || null, email: form.email.trim() || null, notes: form.notes.trim() || null }
+      if (isNew) { const [row] = await sb.insert('hr_suppliers', { ...patch, company_id: companyId }); onAdd(row); setMsg('Added.') }
+      else { const [row] = await sb.update('hr_suppliers', { id: supplier.id }, patch); onUpdate(row); setMsg('Saved.') }
+    } catch (err) { setMsg(err.message) } finally { setSaving(false) }
+  }
+  async function deactivate() {
+    if (!window.confirm(`Remove ${supplier.name} from the supplier list? Items linked to it keep their history.`)) return
+    await sb.update('hr_suppliers', { id: supplier.id }, { active: false })
+    onRemove(supplier.id)
+  }
+  function copyList() {
+    const text = toOrder.map((r) => `${r.label}\t${fmt(orderQty(r.stock), 0)}\tR ${fmt(orderQty(r.stock) * Number(r.item.price || 0))}`).join('\n')
+    const flash = () => { setCopied(true); setTimeout(() => setCopied(false), 1500) }
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(flash).catch(flash)
+    else { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); flash() }
+  }
+
+  const tabs = isNew ? [{ id: 'details', label: 'Details' }] : [{ id: 'details', label: 'Details' }, { id: 'items', label: 'Items supplied', count: items.length }]
+  return (
+    <Drawer title={isNew ? 'New supplier' : supplier.name}
+      meta={isNew ? 'Name first; link uniform and linen items to it afterwards.' : `${items.length} item${items.length === 1 ? '' : 's'} linked${toOrder.length ? ` · ${toOrder.length} below minimum` : ''}`}
+      tabs={tabs} tab={tab} onTab={setTab} onClose={onClose}
+      footer={<>
+        <button type="submit" form="supplier-form" style={styles.button} disabled={saving || !dirty || tab !== 'details'}>{saving ? 'Saving…' : isNew ? 'Add supplier' : 'Save changes'}</button>
+        <button type="button" style={styles.buttonGhost} onClick={onClose}>{dirty && !isNew ? 'Cancel' : 'Close'}</button>
+        {!isNew && <button type="button" style={styles.buttonDanger} onClick={deactivate}>Deactivate</button>}
+        <span className="hint">{msg || (dirty && !isNew ? 'Unsaved changes' : 'Esc closes')}</span>
+      </>}>
+      {tab === 'details' && (
+        <form id="supplier-form" onSubmit={save} className="drawer-grid">
+          <div className="field full"><label style={styles.label}>Name</label><input style={styles.input} value={form.name} onChange={f('name')} autoFocus={isNew} /></div>
+          <div className="field"><label style={styles.label}>Contact name</label><input style={styles.input} value={form.contact_name} onChange={f('contact_name')} /></div>
+          <div className="field"><label style={styles.label}>Phone</label><input style={styles.input} value={form.phone} onChange={f('phone')} /></div>
+          <div className="field full"><label style={styles.label}>Email</label><input type="email" style={styles.input} value={form.email} onChange={f('email')} /></div>
+          <div className="field full"><label style={styles.label}>Notes</label><input style={styles.input} value={form.notes} onChange={f('notes')} placeholder="e.g. Net 30, embroidery 10 working days" /></div>
+        </form>
+      )}
+      {tab === 'items' && !isNew && (
+        <>
+          <table style={styles.table}>
+            <thead><tr><th style={styles.th}>Item</th><th style={{ ...styles.th, textAlign: 'right' }}>On hand</th><th style={{ ...styles.th, textAlign: 'right' }}>Min</th><th style={{ ...styles.th, textAlign: 'right' }}>To order</th></tr></thead>
+            <tbody>
+              {items.map((r, i) => (
+                <tr key={i}>
+                  <td style={{ ...styles.td, whiteSpace: 'normal' }}><strong>{r.item.name}</strong><span className="emp-sub">{r.kind}{r.item.category ? ` · ${r.item.category}` : ''}{r.kind === 'Uniform' && r.item.size ? ` · ${r.item.size}` : ''}{r.kind === 'Linen' ? ` · ${r.stock.location_id}` : ''}</span></td>
+                  <td style={styles.tdNum}>{r.stock ? fmt(r.stock.qty_on_hand, 0) : '—'}</td>
+                  <td style={styles.tdNum}>{r.stock ? fmt(r.stock.min_units, 0) : '—'}</td>
+                  <td style={styles.tdNum}>{r.low ? <span style={styles.badge('bad')}>{fmt(orderQty(r.stock), 0)}</span> : ''}</td>
+                </tr>
+              ))}
+              {items.length === 0 && <tr><td style={styles.td} colSpan={4}>No items linked — pick this supplier on a uniform or linen item.</td></tr>}
+            </tbody>
+          </table>
+          {toOrder.length > 0 && (
+            <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button type="button" style={styles.buttonGhost} onClick={copyList}>{copied ? 'Copied' : 'Copy order list'}</button>
+              <span style={{ fontSize: 12, color: colors.muted }}>The same list the Orders tab builds for this supplier.</span>
+            </div>
+          )}
+        </>
+      )}
+    </Drawer>
   )
 }
 
@@ -4571,433 +4621,342 @@ const BLANK_CONTRACT_FORM = {
   notes: '',
 }
 
+// Contracts — HR Admin only. Readability pass (2026-09-27): a six-column
+// table (employee, current contract, salary, fixed real cost, status, open)
+// and one drawer per employee with Current contract (edited IN PLACE — same
+// row, see the 2026-08-18 note on editing below) · Cost · History. A new
+// contract row is added from the footer's "+ New contract", which keeps the
+// history instead of overwriting it.
+function contractToForm(contract) {
+  const n = (v) => (v === null || v === undefined ? '' : String(v))
+  return {
+    contract_type: contract.contract_type || 'Permanent',
+    start_date: contract.start_date || todayStr(),
+    end_date: contract.end_date || '',
+    salary: n(contract.salary),
+    medical_aid: !!contract.medical_aid,
+    medical_aid_scheme: contract.medical_aid_scheme || '',
+    medical_aid_monthly_cost: n(contract.medical_aid_monthly_cost),
+    pension_fund: !!contract.pension_fund,
+    pension_fund_name: contract.pension_fund_name || '',
+    pension_fund_monthly_cost: n(contract.pension_fund_monthly_cost),
+    housing_monthly_cost: n(contract.housing_monthly_cost),
+    notes: contract.notes || '',
+  }
+}
+function contractPatch(form) {
+  const num = (v) => (v === '' ? null : Number(v))
+  return {
+    contract_type: form.contract_type,
+    start_date: form.start_date,
+    end_date: form.end_date || null,
+    salary: num(form.salary),
+    medical_aid: form.medical_aid,
+    medical_aid_scheme: form.medical_aid_scheme || null,
+    medical_aid_monthly_cost: num(form.medical_aid_monthly_cost),
+    pension_fund: form.pension_fund,
+    pension_fund_name: form.pension_fund_name || null,
+    pension_fund_monthly_cost: num(form.pension_fund_monthly_cost),
+    housing_monthly_cost: num(form.housing_monthly_cost),
+    notes: form.notes,
+  }
+}
+function fixedRealCostOf(c) {
+  return c ? Number(c.salary || 0) + Number(c.medical_aid_monthly_cost || 0) + Number(c.pension_fund_monthly_cost || 0) + Number(c.housing_monthly_cost || 0) : null
+}
+function contractStatus(contract) {
+  if (!contract) return { tone: 'neutral', text: 'No contract', days: null }
+  if (!contract.end_date) return { tone: 'good', text: 'Ongoing', days: null }
+  const days = daysUntil(contract.end_date)
+  if (days === null) return { tone: 'neutral', text: contract.end_date, days }
+  if (days < 0) return { tone: 'bad', text: `Ended ${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ago`, days }
+  if (days <= 60) return { tone: days <= 14 ? 'bad' : 'neutral', text: `Ends in ${days} day${days === 1 ? '' : 's'}`, days }
+  return { tone: 'good', text: `Until ${contract.end_date}`, days }
+}
+
 function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
-  const [selectedEmployeeId, setSelectedEmployeeId] = useState('')
-  const [form, setForm] = useState(BLANK_CONTRACT_FORM)
-  const [saving, setSaving] = useState(false)
-  // Set while amending an EXISTING contract row in place (2026-08-18) — the
-  // Staff Cost tab's fields (medical aid/pension cost etc.) were added
-  // after a lot of employees already had a contract on file, so those rows
-  // are just missing the newer numbers. Re-typing a brand new contract row
-  // for every existing employee would double their contract history and
-  // make it look like everyone got a new contract on the same day, so
-  // "Edit contract" instead updates the same row via sb.update rather than
-  // inserting — see startEditContract/saveContractEdit below. null means
-  // the form below is in its original "add a new contract row" mode.
-  const [editingContractId, setEditingContractId] = useState(null)
+  const [search, setSearch] = useState('')
+  const [deptFilter, setDeptFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [typeFilter, setTypeFilter] = useState('')
+  const [openId, setOpenId] = useState(null) // employee id
 
   const overview = useMemo(
     () =>
       employees
         .map((e) => ({ employee: e, contract: currentContract(e.id, contracts) }))
-        .sort((a, b) => `${a.employee.first_name}`.localeCompare(b.employee.first_name)),
+        .sort((a, b) => `${a.employee.first_name} ${a.employee.last_name}`.localeCompare(`${b.employee.first_name} ${b.employee.last_name}`)),
     [employees, contracts]
   )
-
-  const selectedHistory = useMemo(
-    () =>
-      contracts
-        .filter((c) => c.employee_id === selectedEmployeeId)
-        .sort((a, b) => (a.start_date < b.start_date ? 1 : -1)),
-    [contracts, selectedEmployeeId]
-  )
-
-  async function addContract() {
-    if (!selectedEmployeeId || !form.start_date) return
-    setSaving(true)
-    const [row] = await sb.insert('hr_contracts', {
-      company_id: companyId,
-      employee_id: selectedEmployeeId,
-      contract_type: form.contract_type,
-      start_date: form.start_date,
-      end_date: form.end_date || null,
-      salary: form.salary === '' ? null : Number(form.salary),
-      medical_aid: form.medical_aid,
-      medical_aid_scheme: form.medical_aid_scheme || null,
-      medical_aid_monthly_cost: form.medical_aid_monthly_cost === '' ? null : Number(form.medical_aid_monthly_cost),
-      pension_fund: form.pension_fund,
-      pension_fund_name: form.pension_fund_name || null,
-      pension_fund_monthly_cost: form.pension_fund_monthly_cost === '' ? null : Number(form.pension_fund_monthly_cost),
-      housing_monthly_cost: form.housing_monthly_cost === '' ? null : Number(form.housing_monthly_cost),
-      notes: form.notes,
+  const departments = useMemo(() => Array.from(new Set(employees.map((e) => e.department?.trim()).filter(Boolean))).sort(), [employees])
+  const q = search.trim().toLowerCase()
+  const rows = overview
+    .filter(({ employee }) => !q || `${employee.first_name} ${employee.last_name} ${employee.position || ''}`.toLowerCase().includes(q))
+    .filter(({ employee }) => !deptFilter || (employee.department || '') === deptFilter)
+    .filter(({ contract }) => !typeFilter || contract?.contract_type === typeFilter)
+    .filter(({ contract }) => {
+      if (!statusFilter) return true
+      const st = contractStatus(contract)
+      if (statusFilter === 'ending') return st.days !== null && st.days >= 0 && st.days <= 60
+      if (statusFilter === 'ended') return st.days !== null && st.days < 0
+      if (statusFilter === 'none') return !contract
+      return true
     })
-    setForm(BLANK_CONTRACT_FORM)
-    setSaving(false)
-    onAdd(row)
-  }
-
-  // Amend the employee's EXISTING contract row in place (2026-08-18) instead
-  // of inserting a new one — see the comment on editingContractId above for
-  // why. startEditContract loads the chosen contract's values into the same
-  // form the "add" flow uses; saveContractEdit patches that row via
-  // sb.update rather than sb.insert.
-  function startEditContract(employee, contract) {
-    setSelectedEmployeeId(employee.id)
-    setEditingContractId(contract.id)
-    setForm({
-      contract_type: contract.contract_type || 'Permanent',
-      start_date: contract.start_date || todayStr(),
-      end_date: contract.end_date || '',
-      salary: contract.salary === null || contract.salary === undefined ? '' : String(contract.salary),
-      medical_aid: !!contract.medical_aid,
-      medical_aid_scheme: contract.medical_aid_scheme || '',
-      medical_aid_monthly_cost:
-        contract.medical_aid_monthly_cost === null || contract.medical_aid_monthly_cost === undefined
-          ? ''
-          : String(contract.medical_aid_monthly_cost),
-      pension_fund: !!contract.pension_fund,
-      pension_fund_name: contract.pension_fund_name || '',
-      pension_fund_monthly_cost:
-        contract.pension_fund_monthly_cost === null || contract.pension_fund_monthly_cost === undefined
-          ? ''
-          : String(contract.pension_fund_monthly_cost),
-      housing_monthly_cost:
-        contract.housing_monthly_cost === null || contract.housing_monthly_cost === undefined
-          ? ''
-          : String(contract.housing_monthly_cost),
-      notes: contract.notes || '',
-    })
-  }
-
-  function cancelEditContract() {
-    setEditingContractId(null)
-    setForm(BLANK_CONTRACT_FORM)
-  }
-
-  async function saveContractEdit() {
-    if (!editingContractId) return
-    setSaving(true)
-    const [row] = await sb.update('hr_contracts', { id: editingContractId }, {
-      contract_type: form.contract_type,
-      start_date: form.start_date,
-      end_date: form.end_date || null,
-      salary: form.salary === '' ? null : Number(form.salary),
-      medical_aid: form.medical_aid,
-      medical_aid_scheme: form.medical_aid_scheme || null,
-      medical_aid_monthly_cost: form.medical_aid_monthly_cost === '' ? null : Number(form.medical_aid_monthly_cost),
-      pension_fund: form.pension_fund,
-      pension_fund_name: form.pension_fund_name || null,
-      pension_fund_monthly_cost: form.pension_fund_monthly_cost === '' ? null : Number(form.pension_fund_monthly_cost),
-      housing_monthly_cost: form.housing_monthly_cost === '' ? null : Number(form.housing_monthly_cost),
-      notes: form.notes,
-    })
-    setSaving(false)
-    setEditingContractId(null)
-    setForm(BLANK_CONTRACT_FORM)
-    onUpdate(row)
-  }
-
-  const empName = (id) => {
-    const e = employees.find((x) => x.id === id)
-    return e ? `${e.first_name} ${e.last_name}` : 'Unknown'
-  }
+  const ending = overview.filter(({ contract }) => { const d = contractStatus(contract).days; return d !== null && d >= 0 && d <= 60 }).length
+  const ended = overview.filter(({ contract }) => { const d = contractStatus(contract).days; return d !== null && d < 0 }).length
+  const totalFixed = overview.reduce((s, { contract }) => s + (fixedRealCostOf(contract) || 0), 0)
+  const openRow = openId ? overview.find((r) => r.employee.id === openId) : null
 
   return (
     <>
-      <div style={styles.card}>
-        <div style={styles.cardTitle}>All employees — current contract</div>
-        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-          Sensitive data — salary, medical aid, and pension details are only visible to HR Admin. "Fixed real
-          cost/mo" is salary + healthcare + pension + housing only — see the Staff Cost tab for the full picture
-          including each employee's share of staff Food and Beverage consumption.
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, marginBottom: 12 }}>
+        <div style={{ fontSize: 13, color: colors.muted }}>
+          {employees.length} employee{employees.length === 1 ? '' : 's'}
+          {ending ? ` · ${ending} contract${ending === 1 ? '' : 's'} ending within 60 days` : ''}
+          {ended ? ` · ${ended} ended` : ''}
+          {` · fixed real cost R ${fmt(totalFixed)} / month`}
         </div>
-        <div style={styles.tableWrap}>
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Employee</th>
-              <th style={styles.th}>Type</th>
-              <th style={styles.th}>Start date</th>
-              <th style={styles.th}>End date</th>
-              <th style={styles.th}>Salary</th>
-              <th style={styles.th}>Medical aid</th>
-              <th style={styles.th}>Pension</th>
-              <th style={styles.th}>Housing/mo</th>
-              <th style={styles.th}>Fixed real cost/mo</th>
-            </tr>
-          </thead>
-          <tbody>
-            {overview.map(({ employee, contract }) => {
-              const days = contract?.end_date ? daysUntil(contract.end_date) : null
-              const fixedRealCost = contract
-                ? Number(contract.salary || 0) +
-                  Number(contract.medical_aid_monthly_cost || 0) +
-                  Number(contract.pension_fund_monthly_cost || 0) +
-                  Number(contract.housing_monthly_cost || 0)
-                : null
-              return (
-                <tr key={employee.id}>
-                  <td style={styles.td}>
-                    <div style={{ ...styles.row, gap: 6, flexWrap: 'wrap' }}>
-                      <button
-                        style={{ ...styles.buttonGhost, padding: '3px 8px', fontSize: 12 }}
-                        onClick={() => {
-                          setSelectedEmployeeId(employee.id)
-                          cancelEditContract()
-                        }}
-                      >
-                        {employee.first_name} {employee.last_name}
-                      </button>
-                      {contract && (
-                        <button
-                          style={{ ...styles.buttonGhost, padding: '3px 8px', fontSize: 12, color: colors.gold }}
-                          onClick={() => startEditContract(employee, contract)}
-                        >
-                          Edit contract
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                  <td style={styles.td}>{contract?.contract_type || '—'}</td>
-                  <td style={styles.td}>{contract?.start_date || '—'}</td>
-                  <td style={styles.td}>
-                    {contract?.end_date ? (
-                      <span style={styles.badge(days !== null && days <= 60 ? 'bad' : 'neutral')}>{contract.end_date}</span>
-                    ) : (
-                      '—'
-                    )}
-                  </td>
-                  <td style={styles.tdNum}>{contract?.salary ? `R ${fmt(contract.salary)}` : '—'}</td>
-                  <td style={styles.td}>
-                    {contract
-                      ? contract.medical_aid
-                        ? contract.medical_aid_monthly_cost
-                          ? `R ${fmt(contract.medical_aid_monthly_cost)}`
-                          : 'Yes'
-                        : 'No'
-                      : '—'}
-                  </td>
-                  <td style={styles.td}>
-                    {contract
-                      ? contract.pension_fund
-                        ? contract.pension_fund_monthly_cost
-                          ? `R ${fmt(contract.pension_fund_monthly_cost)}`
-                          : 'Yes'
-                        : 'No'
-                      : '—'}
-                  </td>
-                  <td style={styles.tdNum}>{contract?.housing_monthly_cost ? `R ${fmt(contract.housing_monthly_cost)}` : '—'}</td>
-                  <td style={styles.tdNum}>{fixedRealCost ? `R ${fmt(fixedRealCost)}` : '—'}</td>
-                </tr>
-              )
-            })}
-            {overview.length === 0 && (
-              <tr>
-                <td style={styles.td} colSpan={9}>
-                  No employees yet — add them on the Employees tab first.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-        </div>
+      </div>
+      <div className="toolbar">
+        <input placeholder="Search employee…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <select value={deptFilter} onChange={(e) => setDeptFilter(e.target.value)}>
+          <option value="">All departments</option>
+          {departments.map((d) => <option key={d} value={d}>{d}</option>)}
+        </select>
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="">All contracts</option>
+          <option value="ending">Ending within 60 days</option>
+          <option value="ended">Ended</option>
+          <option value="none">No contract</option>
+        </select>
+        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+          <option value="">All types</option>
+          {CONTRACT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+        </select>
       </div>
 
       <div style={styles.card}>
-        <div style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap' }}>
-          <div style={styles.cardTitle}>
-            {editingContractId ? `Editing current contract — ${empName(selectedEmployeeId)}` : 'Add / view contract history'}
-          </div>
-          {editingContractId && (
-            <button style={{ ...styles.buttonGhost, padding: '3px 8px', fontSize: 12 }} onClick={cancelEditContract}>
-              Cancel edit
-            </button>
-          )}
-        </div>
-        <div style={styles.formGrid}>
-          <div>
-            <label style={styles.label}>Employee</label>
-            <select
-              style={styles.input}
-              value={selectedEmployeeId}
-              onChange={(e) => {
-                setSelectedEmployeeId(e.target.value)
-                cancelEditContract()
-              }}
-              disabled={!!editingContractId}
-            >
-              <option value="">Choose employee…</option>
-              {employees.map((e) => (
-                <option key={e.id} value={e.id}>
-                  {e.first_name} {e.last_name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        {selectedEmployeeId && (
-          <>
-            <div style={styles.formGrid}>
-              <div>
-                <label style={styles.label}>Contract type</label>
-                <select style={styles.input} value={form.contract_type} onChange={(e) => setForm({ ...form, contract_type: e.target.value })}>
-                  {CONTRACT_TYPES.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label style={styles.label}>Start date</label>
-                <input
-                  type="date"
-                  style={styles.input}
-                  value={form.start_date}
-                  onChange={(e) => setForm({ ...form, start_date: e.target.value })}
-                />
-              </div>
-              <div>
-                <label style={styles.label}>End date (blank if ongoing)</label>
-                <input
-                  type="date"
-                  style={styles.input}
-                  value={form.end_date}
-                  onChange={(e) => setForm({ ...form, end_date: e.target.value })}
-                />
-              </div>
-              <div>
-                <label style={styles.label}>Salary</label>
-                <input
-                  type="number" inputMode="decimal"
-                  style={styles.input}
-                  value={form.salary}
-                  onChange={(e) => setForm({ ...form, salary: e.target.value })}
-                />
-              </div>
-              <div>
-                <label style={styles.label}>Medical aid</label>
-                <select
-                  style={styles.input}
-                  value={form.medical_aid ? 'yes' : 'no'}
-                  onChange={(e) => setForm({ ...form, medical_aid: e.target.value === 'yes' })}
-                >
-                  <option value="no">No</option>
-                  <option value="yes">Yes</option>
-                </select>
-              </div>
-              {form.medical_aid && (
-                <>
-                  <div>
-                    <label style={styles.label}>Medical aid scheme</label>
-                    <input
-                      style={styles.input}
-                      value={form.medical_aid_scheme}
-                      onChange={(e) => setForm({ ...form, medical_aid_scheme: e.target.value })}
-                    />
-                  </div>
-                  <div>
-                    <label style={styles.label}>Medical aid — company cost/month</label>
-                    <input
-                      type="number" inputMode="decimal"
-                      style={styles.input}
-                      value={form.medical_aid_monthly_cost}
-                      onChange={(e) => setForm({ ...form, medical_aid_monthly_cost: e.target.value })}
-                    />
-                  </div>
-                </>
-              )}
-              <div>
-                <label style={styles.label}>Pension fund</label>
-                <select
-                  style={styles.input}
-                  value={form.pension_fund ? 'yes' : 'no'}
-                  onChange={(e) => setForm({ ...form, pension_fund: e.target.value === 'yes' })}
-                >
-                  <option value="no">No</option>
-                  <option value="yes">Yes</option>
-                </select>
-              </div>
-              {form.pension_fund && (
-                <>
-                  <div>
-                    <label style={styles.label}>Pension fund name</label>
-                    <input
-                      style={styles.input}
-                      value={form.pension_fund_name}
-                      onChange={(e) => setForm({ ...form, pension_fund_name: e.target.value })}
-                    />
-                  </div>
-                  <div>
-                    <label style={styles.label}>Pension — company cost/month</label>
-                    <input
-                      type="number" inputMode="decimal"
-                      style={styles.input}
-                      value={form.pension_fund_monthly_cost}
-                      onChange={(e) => setForm({ ...form, pension_fund_monthly_cost: e.target.value })}
-                    />
-                  </div>
-                </>
-              )}
-              <div>
-                <label style={styles.label}>Housing cost/month (electricity, water, upkeep etc.)</label>
-                <input
-                  type="number" inputMode="decimal"
-                  style={styles.input}
-                  value={form.housing_monthly_cost}
-                  onChange={(e) => setForm({ ...form, housing_monthly_cost: e.target.value })}
-                />
-              </div>
-              <div>
-                <label style={styles.label}>Notes</label>
-                <input style={styles.input} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-              </div>
-            </div>
-            <button style={styles.button} onClick={editingContractId ? saveContractEdit : addContract} disabled={saving}>
-              {saving ? 'Saving…' : editingContractId ? 'Save changes' : 'Add contract record'}
-            </button>
-
-            <div style={{ marginTop: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: colors.goldLt, marginBottom: 8 }}>
-                {empName(selectedEmployeeId)} — contract history
-              </div>
-              <div style={styles.tableWrap}>
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Type</th>
-                    <th style={styles.th}>Start</th>
-                    <th style={styles.th}>End</th>
-                    <th style={styles.th}>Salary</th>
-                    <th style={styles.th}>Medical aid</th>
-                    <th style={styles.th}>Medical/mo</th>
-                    <th style={styles.th}>Pension</th>
-                    <th style={styles.th}>Pension/mo</th>
-                    <th style={styles.th}>Housing/mo</th>
-                    <th style={styles.th}>Notes</th>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Employee</th>
+                <th style={styles.th}>Current contract</th>
+                <th style={{ ...styles.th, textAlign: 'right' }}>Salary</th>
+                <th style={{ ...styles.th, textAlign: 'right' }}>Fixed real cost / mo</th>
+                <th style={styles.th}>Status</th>
+                <th style={styles.th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(({ employee, contract }) => {
+                const st = contractStatus(contract)
+                return (
+                  <tr key={employee.id} className="emp-row" onClick={() => setOpenId(employee.id)}>
+                    <td style={{ ...styles.td, whiteSpace: 'normal' }}>
+                      <div style={{ display: 'flex', alignItems: 'center' }}>
+                        <span className="avatar">{initials(employee)}</span>
+                        <span><strong>{employee.first_name} {employee.last_name}</strong><span className="emp-sub">{[employee.position, employee.department].filter(Boolean).join(' · ') || 'No position set'}</span></span>
+                      </div>
+                    </td>
+                    <td style={{ ...styles.td, whiteSpace: 'normal' }}>
+                      {contract ? <>{contract.contract_type}<span className="emp-sub">{contract.end_date ? `${contract.start_date} → ${contract.end_date}` : `since ${contract.start_date}`}</span></> : <span style={{ color: colors.muted }}>No contract on file</span>}
+                    </td>
+                    <td style={styles.tdNum}>{contract?.salary ? `R ${fmt(contract.salary)}` : '—'}</td>
+                    <td style={styles.tdNum}>{fixedRealCostOf(contract) ? `R ${fmt(fixedRealCostOf(contract))}` : '—'}</td>
+                    <td style={styles.td}><span style={styles.badge(st.tone)}>{st.text}</span></td>
+                    <td style={{ ...styles.td, textAlign: 'right' }}>
+                      <button style={styles.buttonGhost} onClick={(ev) => { ev.stopPropagation(); setOpenId(employee.id) }}>Open</button>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {selectedHistory.map((c) => (
-                    <tr key={c.id}>
-                      <td style={styles.td}>{c.contract_type}</td>
-                      <td style={styles.td}>{c.start_date}</td>
-                      <td style={styles.td}>{c.end_date || '—'}</td>
-                      <td style={styles.tdNum}>{c.salary ? `R ${fmt(c.salary)}` : '—'}</td>
-                      <td style={styles.td}>{c.medical_aid ? c.medical_aid_scheme || 'Yes' : 'No'}</td>
-                      <td style={styles.tdNum}>{c.medical_aid_monthly_cost ? `R ${fmt(c.medical_aid_monthly_cost)}` : '—'}</td>
-                      <td style={styles.td}>{c.pension_fund ? c.pension_fund_name || 'Yes' : 'No'}</td>
-                      <td style={styles.tdNum}>{c.pension_fund_monthly_cost ? `R ${fmt(c.pension_fund_monthly_cost)}` : '—'}</td>
-                      <td style={styles.tdNum}>{c.housing_monthly_cost ? `R ${fmt(c.housing_monthly_cost)}` : '—'}</td>
-                      <td style={styles.td}>{c.notes || '—'}</td>
-                    </tr>
-                  ))}
-                  {selectedHistory.length === 0 && (
-                    <tr>
-                      <td style={styles.td} colSpan={10}>
-                        No contract on record yet — add one above.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                )
+              })}
+              {rows.length === 0 && (
+                <tr><td style={styles.td} colSpan={6}>{employees.length === 0 ? 'No employees yet — add them on the Employees tab first.' : 'Nobody matches those filters.'}</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ fontSize: 11, color: colors.muted, marginTop: 8 }}>
+          Sensitive data — HR Admin only. "Fixed real cost / mo" is salary + healthcare + pension + housing; the Staff Cost tab has the full picture. Medical aid, pension, housing and the contract history are in the contract panel — click a row.
+        </div>
+      </div>
+
+      {openRow && (
+        <ContractDrawer
+          key={openId}
+          companyId={companyId}
+          employee={openRow.employee}
+          contract={openRow.contract}
+          history={contracts.filter((c) => c.employee_id === openId).sort((a, b) => (a.start_date < b.start_date ? 1 : -1))}
+          onAdd={onAdd}
+          onUpdate={onUpdate}
+          onClose={() => setOpenId(null)}
+        />
+      )}
+    </>
+  )
+}
+
+const CONTRACT_TABS = [
+  { id: 'current', label: 'Current contract' },
+  { id: 'cost', label: 'Cost' },
+  { id: 'history', label: 'History' },
+]
+
+function ContractDrawer({ companyId, employee, contract, history, onAdd, onUpdate, onClose }) {
+  const [tab, setTab] = useState('current')
+  // mode 'edit' amends the current row in place (2026-08-18: the Staff Cost
+  // fields were added after most employees already had a contract row, so
+  // filling them in must not look like everyone got a new contract that day);
+  // mode 'new' inserts a fresh row, which is what a renewal or a change of
+  // terms is.
+  const [mode, setMode] = useState(contract ? 'edit' : 'new')
+  const [form, setForm] = useState(() => (contract ? contractToForm(contract) : BLANK_CONTRACT_FORM))
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [error, setError] = useState('')
+  const f = (k) => (e) => setForm((x) => ({ ...x, [k]: e.target.value }))
+  const baseline = mode === 'edit' && contract ? contractToForm(contract) : BLANK_CONTRACT_FORM
+  const dirty = Object.keys(form).some((k) => String(form[k] ?? '') !== String(baseline[k] ?? ''))
+  const st = contractStatus(contract)
+  const fixed = Number(form.salary || 0) + Number(form.medical_aid ? form.medical_aid_monthly_cost || 0 : 0) + Number(form.pension_fund ? form.pension_fund_monthly_cost || 0 : 0) + Number(form.housing_monthly_cost || 0)
+
+  function startNew() {
+    setMode('new')
+    // A renewal usually keeps the benefits — prefill from the current row,
+    // but start the new contract today and clear the end date.
+    setForm(contract ? { ...contractToForm(contract), start_date: todayStr(), end_date: '' } : BLANK_CONTRACT_FORM)
+    setTab('current'); setMsg(''); setError('')
+  }
+  function cancelNew() {
+    setMode(contract ? 'edit' : 'new')
+    setForm(contract ? contractToForm(contract) : BLANK_CONTRACT_FORM)
+    setMsg(''); setError('')
+  }
+
+  async function save(e) {
+    e.preventDefault()
+    setMsg(''); setError('')
+    if (!form.start_date) { setError('A start date is needed.'); return }
+    if (form.end_date && form.end_date < form.start_date) { setError('The end date is before the start date.'); return }
+    setSaving(true)
+    try {
+      if (mode === 'edit' && contract) {
+        const [row] = await sb.update('hr_contracts', { id: contract.id }, contractPatch(form))
+        onUpdate(row)
+        setMsg('Saved — same contract row, amended in place.')
+      } else {
+        const [row] = await sb.insert('hr_contracts', { company_id: companyId, employee_id: employee.id, ...contractPatch(form) })
+        onAdd(row)
+        setMode('edit')
+        setMsg('New contract added. The previous one stays in History.')
+      }
+    } catch (err) { setError(err.message) } finally { setSaving(false) }
+  }
+
+  const meta = (
+    <>
+      <span>{[employee.position, employee.department].filter(Boolean).join(' · ') || 'No position set'}{contract ? ` · ${contract.contract_type} · ${contract.end_date ? `${contract.start_date} → ${contract.end_date}` : `since ${contract.start_date}`}` : ''}</span>
+      <span style={styles.badge(st.tone)}>{st.text}</span>
+    </>
+  )
+  const footer = (
+    <>
+      <button type="submit" form="contract-form" style={styles.button} disabled={saving || !dirty || tab !== 'current'}>{saving ? 'Saving…' : mode === 'new' ? 'Add contract' : 'Save changes'}</button>
+      {mode === 'new' && contract ? (
+        <button type="button" style={styles.buttonGhost} onClick={cancelNew}>Back to current</button>
+      ) : contract ? (
+        <button type="button" style={styles.buttonGhost} onClick={startNew}>+ New contract</button>
+      ) : null}
+      <button type="button" style={styles.buttonGhost} onClick={onClose}>{dirty ? 'Cancel' : 'Close'}</button>
+      <span className="hint">{error ? <span style={{ color: colors.danger }}>{error}</span> : msg || (mode === 'new' ? 'Adds a new row — the current one is kept in History' : 'Sensitive — HR Admin only')}</span>
+    </>
+  )
+
+  return (
+    <Drawer title={`${employee.first_name} ${employee.last_name} — contract`} meta={meta} tabs={CONTRACT_TABS} tab={tab} onTab={setTab} onClose={onClose} footer={footer}>
+      <form id="contract-form" onSubmit={save}>
+        {tab === 'current' && (
+          <>
+            {mode === 'new' && contract && (
+              <div className="drawer-note" style={{ marginBottom: 14 }}>
+                New contract for {employee.first_name} — prefilled from the current one. It becomes the current contract from its start date; the old one is kept in History.
               </div>
+            )}
+            {!contract && <div className="drawer-note" style={{ marginBottom: 14 }}>No contract on file yet for {employee.first_name}. This adds the first one.</div>}
+            <div className="drawer-grid">
+              <div className="field"><label style={styles.label}>Contract type</label>
+                <select style={styles.input} value={form.contract_type} onChange={f('contract_type')}>{CONTRACT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select>
+              </div>
+              <div className="field"><label style={styles.label}>Start date</label><input type="date" style={styles.input} value={form.start_date} onChange={f('start_date')} /></div>
+              <div className="field"><label style={styles.label}>End date</label><input type="date" style={styles.input} value={form.end_date} onChange={f('end_date')} /><div className="help">Blank if ongoing.</div></div>
+              <div className="field"><label style={styles.label}>Salary / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.salary} onChange={f('salary')} /></div>
+            </div>
+            <div className="drawer-sect">Benefits</div>
+            <div className="drawer-grid">
+              <div className="field"><label style={styles.label}>Medical aid</label>
+                <select style={styles.input} value={form.medical_aid ? 'yes' : 'no'} onChange={(e) => setForm((x) => ({ ...x, medical_aid: e.target.value === 'yes' }))}><option value="no">No</option><option value="yes">Yes</option></select>
+              </div>
+              {form.medical_aid ? (
+                <>
+                  <div className="field"><label style={styles.label}>Scheme</label><input style={styles.input} value={form.medical_aid_scheme} onChange={f('medical_aid_scheme')} /></div>
+                  <div className="field"><label style={styles.label}>Medical aid — company cost / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.medical_aid_monthly_cost} onChange={f('medical_aid_monthly_cost')} /></div>
+                </>
+              ) : <div className="field" />}
+              <div className="field"><label style={styles.label}>Pension fund</label>
+                <select style={styles.input} value={form.pension_fund ? 'yes' : 'no'} onChange={(e) => setForm((x) => ({ ...x, pension_fund: e.target.value === 'yes' }))}><option value="no">No</option><option value="yes">Yes</option></select>
+              </div>
+              {form.pension_fund ? (
+                <>
+                  <div className="field"><label style={styles.label}>Fund name</label><input style={styles.input} value={form.pension_fund_name} onChange={f('pension_fund_name')} /></div>
+                  <div className="field"><label style={styles.label}>Pension — company cost / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.pension_fund_monthly_cost} onChange={f('pension_fund_monthly_cost')} /></div>
+                </>
+              ) : <div className="field" />}
+              <div className="field full"><label style={styles.label}>Housing cost / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.housing_monthly_cost} onChange={f('housing_monthly_cost')} /><div className="help">Electricity, water, upkeep of staff accommodation.</div></div>
+              <div className="field full"><label style={styles.label}>Notes</label><input style={styles.input} value={form.notes} onChange={f('notes')} /></div>
+            </div>
+            {mode === 'edit' && contract && (
+              <div className="drawer-note" style={{ marginTop: 14 }}>
+                Editing here amends this contract row in place — no new row, no new start. To renew or change terms, use <b>+ New contract</b> in the footer; that keeps the history.
+              </div>
+            )}
+          </>
+        )}
+
+        {tab === 'cost' && (
+          <>
+            <div className="drawer-stat"><span>Salary</span><span>R {fmt(form.salary || 0)}</span></div>
+            <div className="drawer-stat"><span>Medical aid (company)</span><span>{form.medical_aid ? `R ${fmt(form.medical_aid_monthly_cost || 0)}` : '—'}</span></div>
+            <div className="drawer-stat"><span>Pension (company)</span><span>{form.pension_fund ? `R ${fmt(form.pension_fund_monthly_cost || 0)}` : '—'}</span></div>
+            <div className="drawer-stat"><span>Housing</span><span>R {fmt(form.housing_monthly_cost || 0)}</span></div>
+            <div className="drawer-stat" style={{ borderBottom: 'none' }}><span style={{ fontWeight: 700, color: colors.goldLt }}>Fixed real cost / month</span><b style={{ color: colors.goldLt }}>R {fmt(fixed)}</b></div>
+            <div style={{ fontSize: 12, color: colors.muted, marginTop: 12, lineHeight: 1.5 }}>
+              Salary + healthcare + pension + housing only{dirty ? ' (as typed, not yet saved)' : ''}. Uniforms, bonuses, leave provision and the share of staff food and beverage are on the Staff Cost tab.
             </div>
           </>
         )}
-      </div>
-    </>
+
+        {tab === 'history' && (
+          <>
+            <table style={styles.table}>
+              <thead><tr><th style={styles.th}>Contract</th><th style={styles.th}>Period</th><th style={{ ...styles.th, textAlign: 'right' }}>Salary</th><th style={{ ...styles.th, textAlign: 'right' }}>Fixed cost / mo</th></tr></thead>
+              <tbody>
+                {history.map((c) => (
+                  <tr key={c.id}>
+                    <td style={styles.td}>{c.contract_type}{contract && c.id === contract.id && <> <span style={styles.badge('good')}>current</span></>}{c.notes ? <span className="emp-sub">{c.notes}</span> : null}</td>
+                    <td style={styles.td}>{c.start_date} → {c.end_date || 'ongoing'}</td>
+                    <td style={styles.tdNum}>{c.salary ? `R ${fmt(c.salary)}` : '—'}</td>
+                    <td style={styles.tdNum}>{fixedRealCostOf(c) ? `R ${fmt(fixedRealCostOf(c))}` : '—'}</td>
+                  </tr>
+                ))}
+                {history.length === 0 && <tr><td style={styles.td} colSpan={4}>No contract on record yet.</td></tr>}
+              </tbody>
+            </table>
+          </>
+        )}
+      </form>
+    </Drawer>
   )
 }
 
