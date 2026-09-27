@@ -3087,8 +3087,20 @@ function EmployeesTab({
       .filter((e) => !q || `${e.first_name} ${e.last_name} ${e.position || ''} ${e.department || ''}`.toLowerCase().includes(q))
       .filter((e) => !deptFilter || (e.department || '') === deptFilter)
       .filter((e) => !lodgeFilter || locationByKey[`${e.id}|${thisWeekKey}`]?.location_id === lodgeFilter)
-      .sort((a, b) => `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`))
+      .sort((a, b) => (a.department?.trim() || 'zzz').localeCompare(b.department?.trim() || 'zzz') || `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`))
   }, [employees, search, deptFilter, lodgeFilter, locationByKey, thisWeekKey])
+
+  // Grouped by department with a header row each (headcount, how many are
+  // working today) — Thijs, 2026-09-27, same as the Contracts tab. Employees
+  // with no department sit in their own group at the end.
+  const groups = []
+  for (const e of rows) {
+    const key = e.department?.trim() || 'No department'
+    let g = groups[groups.length - 1]
+    if (!g || g.key !== key) { g = { key, rows: [], working: 0 }; groups.push(g) }
+    g.rows.push(e)
+    if (todayInfo(e).status === 'on') g.working++
+  }
 
   const onLeaveToday = employees.filter((e) => leaveOnDate(leave, e.id, today)).length
   const expiringCount = qualifications.filter((q) => employees.some((e) => e.id === q.employee_id) && expiryStatus(q) !== 'ok' && expiryStatus(q) !== 'none').length
@@ -3130,7 +3142,14 @@ function EmployeesTab({
               </tr>
             </thead>
             <tbody>
-              {rows.map((e) => {
+              {groups.map((g) => (
+                <Fragment key={g.key}>
+                  <tr className="group-row">
+                    <td style={styles.td} colSpan={5}>
+                      <strong>{g.key}</strong> <span style={{ color: colors.muted, fontSize: 12 }}>({g.rows.length}{g.working ? ` · ${g.working} working today` : ''})</span>
+                    </td>
+                  </tr>
+                  {g.rows.map((e) => {
                 const info = todayInfo(e)
                 const weekLoc = locationByKey[`${e.id}|${thisWeekKey}`]
                 const label = info.status === 'on' ? 'Working' : info.status === 'leave' ? 'On leave' : info.status === 'off' ? 'Off' : '—'
@@ -3159,7 +3178,9 @@ function EmployeesTab({
                     </td>
                   </tr>
                 )
-              })}
+                  })}
+                </Fragment>
+              ))}
               {rows.length === 0 && (
                 <tr><td style={styles.td} colSpan={5}>{employees.length === 0 ? 'No employees yet — add one with the button above.' : 'Nobody matches that search.'}</td></tr>
               )}
