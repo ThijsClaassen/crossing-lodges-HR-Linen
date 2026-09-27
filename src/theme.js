@@ -396,6 +396,7 @@ export const css = `
   .drawer-stat{display:flex;justify-content:space-between;font-size:13px;padding:6px 0;border-bottom:1px solid ${colors.border};gap:12px}
   .drawer-stat b{color:${colors.cream}}
   .field .help{font-size:11.5px;color:${colors.muted};margin-top:5px;line-height:1.45}
+  tr.group-row td{background:var(--surface-overlay);border-top:2px solid ${colors.border};padding-top:8px;padding-bottom:7px}
   .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
   .toolbar input,.toolbar select{background:${colors.panel};border:1px solid ${colors.border};border-radius:var(--radius-sm);padding:8px 11px;font:400 13px 'Inter',sans-serif;color:${colors.cream}}
   .toolbar input{flex:1;min-width:180px;max-width:340px}

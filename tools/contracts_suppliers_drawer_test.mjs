@@ -24,6 +24,7 @@ check('App.jsx parses', true)
 
 const ct = fn('ContractsTab')
 check('Contracts table has 6 columns', ths(ct) === 6, String(ths(ct)))
+check('contracts are grouped by department with a header row (headcount + fixed cost subtotal)', /className="group-row"/.test(ct) && /groups\.map\(\(g\) =>/.test(ct) && /'No department'/.test(ct))
 check('rows open the contract drawer', /className="emp-row" onClick=\{\(\) => setOpenId\(employee\.id\)\}/.test(ct))
 check('toolbar: search, department, status, type', /placeholder="Search employee…"/.test(ct) && /All departments/.test(ct) && /Ending within 60 days/.test(ct) && /All types/.test(ct))
 check('status badge: ended / ends in N days / ongoing / no contract', /Ended \$\{Math\.abs\(days\)\}/.test(APP) && /Ends in \$\{days\}/.test(APP) && /text: 'Ongoing'/.test(APP) && /text: 'No contract'/.test(APP))

@@ -4702,6 +4702,20 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
       if (statusFilter === 'none') return !contract
       return true
     })
+  // Grouped by department with a header row each (headcount, fixed real
+  // cost subtotal) — Thijs, 2026-09-27: "divide people in job categories
+  // (housekeeping, management etc)". Employees with no department sit in
+  // their own group at the end.
+  const groups = []
+  for (const r of [...rows].sort((a, b) => (a.employee.department || 'zzz').localeCompare(b.employee.department || 'zzz') || `${a.employee.first_name} ${a.employee.last_name}`.localeCompare(`${b.employee.first_name} ${b.employee.last_name}`))) {
+    const key = r.employee.department?.trim() || 'No department'
+    let g = groups[groups.length - 1]
+    if (!g || g.key !== key) { g = { key, rows: [], fixed: 0, ending: 0 }; groups.push(g) }
+    g.rows.push(r)
+    g.fixed += fixedRealCostOf(r.contract) || 0
+    const d = contractStatus(r.contract).days
+    if (d !== null && d <= 60) g.ending++
+  }
   const ending = overview.filter(({ contract }) => { const d = contractStatus(contract).days; return d !== null && d >= 0 && d <= 60 }).length
   const ended = overview.filter(({ contract }) => { const d = contractStatus(contract).days; return d !== null && d < 0 }).length
   const totalFixed = overview.reduce((s, { contract }) => s + (fixedRealCostOf(contract) || 0), 0)
@@ -4749,7 +4763,16 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map(({ employee, contract }) => {
+              {groups.map((g) => (
+                <Fragment key={g.key}>
+                  <tr className="group-row">
+                    <td style={styles.td} colSpan={3}>
+                      <strong>{g.key}</strong> <span style={{ color: colors.muted, fontSize: 12 }}>({g.rows.length}{g.ending ? ` · ${g.ending} ending or ended` : ''})</span>
+                    </td>
+                    <td style={styles.tdNum}><strong>R {fmt(g.fixed)}</strong></td>
+                    <td style={styles.td} colSpan={2} />
+                  </tr>
+                  {g.rows.map(({ employee, contract }) => {
                 const st = contractStatus(contract)
                 return (
                   <tr key={employee.id} className="emp-row" onClick={() => setOpenId(employee.id)}>
@@ -4770,7 +4793,9 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
                     </td>
                   </tr>
                 )
-              })}
+                  })}
+                </Fragment>
+              ))}
               {rows.length === 0 && (
                 <tr><td style={styles.td} colSpan={6}>{employees.length === 0 ? 'No employees yet — add them on the Employees tab first.' : 'Nobody matches those filters.'}</td></tr>
               )}
