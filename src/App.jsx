@@ -23,10 +23,25 @@ import SetPassword from './SetPassword.jsx'
 import { CompanyProvider, useCompany } from './CompanyContext.jsx'
 import { SUPABASE_URL } from './supabaseClient'
 import { resolveCompanyLogo, logoStyle } from './companyLogo.js'
+import {
+  QUALIFICATION_KINDS, KIND_LABEL, LICENCE_CLASSES, expiryStatus, expiryLabel, groupByUrgency,
+  describeQualification, bestLicence, uploadQualificationFile, qualificationFileUrl, removeQualificationFile,
+} from './qualifications.js'
+import { buildAppraisalPack, appraisalHtml } from './appraisal.js'
+import { parseCsv, guessColumnMap, normaliseRows, weeklyTrend, rosterForWeek, departmentTrend, CATEGORY_GUESS } from './guestFeedback.js'
 
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
+
+
+// Deep links from the Finance Dashboard (#489, 2026-09-27): ?page=<tab id>
+// opens that tab, ?loc=<lodge id> picks that lodge. Read once at mount; an
+// unknown id falls back to the default so a stale link never breaks the app.
+function urlParam(name) {
+  if (typeof window === 'undefined') return null
+  return new URLSearchParams(window.location.search).get(name)
+}
 
 function fmt(n, decimals = 2) {
   if (n === null || n === undefined || Number.isNaN(n)) return '—'
@@ -422,12 +437,14 @@ const ADMIN_TABS = [
   { id: 'linen', label: 'Linen' },
   { id: 'suppliers', label: 'Suppliers' },
   { id: 'orders', label: 'Orders' },
+  { id: 'feedback', label: 'Guest Feedback' },
 ]
 const HRADMIN_TABS = [
   ...ADMIN_TABS,
   { id: 'contracts', label: 'Contracts' },
   { id: 'staffcost', label: 'Staff Cost' },
   { id: 'loans', label: 'Staff Loans' },
+  { id: 'appraisals', label: 'Appraisals' },
 ]
 
 function tabsForRole(role) {
@@ -555,11 +572,17 @@ function AuthenticatedApp() {
     await supabase.auth.signOut()
   }
 
-  const [tab, setTab] = useState('dashboard')
+  const [tab, setTab] = useState(() => urlParam('page') || 'dashboard')
   const [menuOpen, setMenuOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [uniformEmployeeId, setUniformEmployeeId] = useState(null)
+  // Licences & qualifications (#484). Which employee's modal is open, and the rows.
+  const [qualEmployeeId, setQualEmployeeId] = useState(null)
+  const [qualifications, setQualifications] = useState([])
+  // Guest feedback (#487): imported GuestRevu exports + the company's mapping.
+  const [guestFeedback, setGuestFeedback] = useState([])
+  const [feedbackSettings, setFeedbackSettings] = useState(null)
 
   const [employees, setEmployees] = useState([])
   const [suppliers, setSuppliers] = useState([])
@@ -685,6 +708,19 @@ function AuthenticatedApp() {
         .select('hr_employee_off_days', { company_id: companyId }, { order: 'off_date.asc' })
         .catch(() => [])
       setRosteredOffDays(offDaysRes || [])
+
+      // Licences & qualifications (#484). .catch for the same reason as the
+      // two above: before add_hr_qualifications.sql has run, nobody has any.
+      const qualRes = await sb
+        .select('hr_qualifications', { company_id: companyId }, { order: 'expires_on.asc' })
+        .catch(() => [])
+      setQualifications(qualRes || [])
+
+      // Guest feedback (#487). Same .catch: nothing until add_guest_feedback.sql.
+      const fbRes = await sb.select('guest_feedback', { company_id: companyId }, { order: 'stay_date.desc' }).catch(() => [])
+      setGuestFeedback(fbRes || [])
+      const fbSet = await sb.select('guest_feedback_settings', { company_id: companyId }, {}).catch(() => [])
+      setFeedbackSettings(fbSet?.[0] || null)
       setContracts(conRes || [])
       setLoans(loanRes || [])
       setBonuses(bonusRes || [])
@@ -996,6 +1032,8 @@ function AuthenticatedApp() {
                 linenMovements={linenMovements}
                 employees={employees}
                 contracts={contracts}
+                qualifications={qualifications}
+                onOpenQualifications={setQualEmployeeId}
               />
             )}
             {activeTab === 'employees' && (role === 'admin' || role === 'hradmin') && (
@@ -1010,6 +1048,8 @@ function AuthenticatedApp() {
                 onUpdate={updateLocalEmployee}
                 onRemove={removeLocalEmployee}
                 onSelectEmployee={setUniformEmployeeId}
+                qualifications={qualifications}
+                onSelectQualifications={setQualEmployeeId}
               />
             )}
             {activeTab === 'schedule' && (role === 'admin' || role === 'hradmin') && (
@@ -1106,6 +1146,33 @@ function AuthenticatedApp() {
             {activeTab === 'staffcost' && role === 'hradmin' && (
               <StaffCostTab companyId={companyId} employees={employees} contracts={contracts} scheduleLocations={scheduleLocations} bonuses={bonuses} setBonuses={setBonuses} />
             )}
+            {activeTab === 'feedback' && (role === 'admin' || role === 'hradmin') && (
+              <GuestFeedbackTab
+                companyId={companyId}
+                employees={employees}
+                scheduleLocations={scheduleLocations}
+                feedback={guestFeedback}
+                setFeedback={setGuestFeedback}
+                settings={feedbackSettings}
+                setSettings={setFeedbackSettings}
+              />
+            )}
+            {activeTab === 'appraisals' && role === 'hradmin' && (
+              <AppraisalsTab
+                companyId={companyId}
+                companyName={companyName}
+                employees={employees}
+                contracts={contracts}
+                qualifications={qualifications}
+                leave={leave}
+                rosteredOffDays={rosteredOffDays}
+                bonuses={bonuses}
+                shiftPatterns={shiftPatterns}
+                scheduleLocations={scheduleLocations}
+                guestFeedback={guestFeedback}
+                feedbackSettings={feedbackSettings}
+              />
+            )}
             {activeTab === 'loans' && role === 'hradmin' && (
               <LoansTab
                 companyId={companyId}
@@ -1167,6 +1234,17 @@ function AuthenticatedApp() {
             onIssuesRemove={removeLocalUniformIssue}
           />
         )}
+
+        {qualEmployeeId && employeeById[qualEmployeeId] && (
+          <EmployeeQualificationsModal
+            companyId={companyId}
+            employee={employeeById[qualEmployeeId]}
+            rows={qualifications.filter((q) => q.employee_id === qualEmployeeId)}
+            onClose={() => setQualEmployeeId(null)}
+            onAdd={(row) => setQualifications((prev) => [...prev, row])}
+            onRemove={(id) => setQualifications((prev) => prev.filter((q) => q.id !== id))}
+          />
+        )}
       </div>
     </div>
   )
@@ -1193,7 +1271,7 @@ function lowStockRowsLinen(items, stock) {
     .map((s) => ({ item: itemById[s.item_id], stock: s }))
 }
 
-function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, linenItems, linenStock, linenMovements, employees, contracts }) {
+function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, linenItems, linenStock, linenMovements, employees, contracts, qualifications = [], onOpenQualifications }) {
   const [writeOffYear, setWriteOffYear] = useState(new Date().getFullYear())
 
   const lowUniforms = useMemo(() => lowStockRows(uniformItems, uniformStockByItem), [uniformItems, uniformStockByItem])
@@ -1267,6 +1345,13 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
   const expired = useMemo(() => expiringSoon.filter((x) => x.days < 0), [expiringSoon])
   const upcoming = useMemo(() => expiringSoon.filter((x) => x.days >= 0), [expiringSoon])
 
+  // Licences & qualifications running out (#484). Only for people still on
+  // the books — a licence on a departed employee's record is not a problem.
+  const qualUrgency = useMemo(() => {
+    const active = new Set(employees.map((e) => e.id))
+    return groupByUrgency(qualifications.filter((q) => active.has(q.employee_id)))
+  }, [qualifications, employees])
+
   return (
     <>
       <div style={styles.card}>
@@ -1331,6 +1416,66 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
           </div>
         </div>
       </div>
+
+      {(qualUrgency.expired.length > 0 || qualUrgency.upcoming.length > 0) && (
+        <div style={styles.card}>
+          <div style={styles.cardTitle}>
+            {qualUrgency.expired.length > 0
+              ? `Licences & qualifications — ${qualUrgency.expired.length} expired${qualUrgency.upcoming.length ? `, ${qualUrgency.upcoming.length} coming up` : ''}`
+              : `Licences & qualifications — ${qualUrgency.upcoming.length} expiring within 60 days`}
+          </div>
+          <div style={{ fontSize: 11, color: colors.muted, marginBottom: 8 }}>
+            A driver on an expired licence is an insurance problem, not an admin one — the vehicle log will not offer them.
+          </div>
+          <div style={styles.tableWrap}>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>Employee</th>
+                  <th style={styles.th}>Document</th>
+                  <th style={styles.th}>Expiry</th>
+                  <th style={styles.th}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  { key: 'expired', label: 'Expired', rows: qualUrgency.expired },
+                  { key: 'upcoming', label: 'Coming up', rows: qualUrgency.upcoming },
+                ]
+                  .filter((g) => g.rows.length)
+                  .map((g) => (
+                    <Fragment key={g.key}>
+                      {qualUrgency.expired.length > 0 && qualUrgency.upcoming.length > 0 && (
+                        <tr>
+                          <td colSpan={4} style={{ ...styles.td, fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', fontWeight: 700, color: g.key === 'expired' ? colors.danger : colors.muted }}>
+                            {g.label} ({g.rows.length})
+                          </td>
+                        </tr>
+                      )}
+                      {g.rows.map(({ q, days }) => {
+                        const emp = employees.find((e) => e.id === q.employee_id)
+                        return (
+                          <tr key={q.id}>
+                            <td style={styles.td}>
+                              <button style={styles.buttonGhost} onClick={() => onOpenQualifications?.(q.employee_id)}>
+                                {emp ? `${emp.first_name} ${emp.last_name}` : 'Unknown'}
+                              </button>
+                            </td>
+                            <td style={styles.td}>{describeQualification(q)}</td>
+                            <td style={styles.td}>{q.expires_on}</td>
+                            <td style={styles.td}>
+                              <span style={styles.badge(days < 0 ? 'bad' : 'neutral')}>{expiryLabel(q)}</span>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </Fragment>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {role === 'hradmin' && (
         <div style={styles.card}>
@@ -2810,7 +2955,7 @@ function LeaveTab({ companyId, employees, shiftPatterns, rosteredOffDays, leave,
 // Employees tab — Admin/HR Admin: master list, one lodge at a time.
 // ---------------------------------------------------------------------------
 
-function EmployeesTab({ companyId, employees, shiftPatterns, rosteredOffDays, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee }) {
+function EmployeesTab({ companyId, employees, shiftPatterns, rosteredOffDays, scheduleLocations, leave, onAdd, onUpdate, onRemove, onSelectEmployee, qualifications = [], onSelectQualifications }) {
   const today = parseDateOnly(todayStr())
 
   // hr_schedule_locations.week_start_date is always Monday-anchored no
@@ -3080,6 +3225,7 @@ function EmployeesTab({ companyId, employees, shiftPatterns, rosteredOffDays, sc
               <th style={styles.th}>Name</th>
               <th style={styles.th}>Today</th>
               <th style={styles.th}>Uniforms</th>
+              <th style={styles.th}>Licences</th>
               <th style={styles.th}>Position</th>
               <th style={styles.th}>Department</th>
               <th style={styles.th}>Start date</th>
@@ -3114,6 +3260,18 @@ function EmployeesTab({ companyId, employees, shiftPatterns, rosteredOffDays, sc
                   <button style={styles.buttonGhost} onClick={() => onSelectEmployee(e.id)}>
                     View items
                   </button>
+                </td>
+                <td style={styles.td}>
+                  {(() => {
+                    const mine = qualifications.filter((q) => q.employee_id === e.id)
+                    const lic = bestLicence(mine)
+                    const worst = mine.some((q) => expiryStatus(q) === 'expired') ? 'bad' : mine.some((q) => expiryStatus(q) === 'soon') ? 'warn' : 'neutral'
+                    return (
+                      <button style={styles.buttonGhost} onClick={() => onSelectQualifications?.(e.id)} title="Licences & qualifications">
+                        {mine.length === 0 ? 'Add' : <span style={styles.badge(worst === 'warn' ? 'neutral' : worst)}>{lic ? `Code ${lic.category || '?'}` : ''}{lic && mine.length > 1 ? ' +' : ''}{!lic ? `${mine.length}` : ''}{mine.length > 1 && lic ? `${mine.length - 1}` : ''}{worst === 'bad' ? ' — expired' : worst === 'warn' ? ' — expiring' : ''}</span>}
+                      </button>
+                    )
+                  })()}
                 </td>
                 <td style={styles.td}>
                   {addingPositionForId === e.id ? (
@@ -3236,7 +3394,7 @@ function EmployeesTab({ companyId, employees, shiftPatterns, rosteredOffDays, sc
             })}
             {employees.length === 0 && (
               <tr>
-                <td style={styles.td} colSpan={10}>
+                <td style={styles.td} colSpan={11}>
                   No employees yet — add one above.
                 </td>
               </tr>
@@ -3665,7 +3823,7 @@ function UniformsTab({
 
 function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemAdd, onItemUpdate, onItemRemove, onStockChange, onMovementAdd }) {
   const isAdmin = role === 'admin' || role === 'hradmin'
-  const [location, setLocation] = useState('ZC')
+  const [location, setLocation] = useState(() => urlParam('loc') || 'ZC')
   // 'ZC' is only a first guess: this state initialises before the lodge list
   // has loaded (CompanyContext fetches it), and another company won't have a
   // lodge called ZC at all. Once LOCATIONS is populated — and again whenever
@@ -5845,5 +6003,644 @@ function EmployeeUniformModal({ role, companyId, employee, items, stockByItem, i
 
       {confirmMsg && <ConfirmPopup message={confirmMsg} onClose={() => setConfirmMsg(null)} />}
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Licences & qualifications per employee (#484). One row per document: what
+// it is, its class, when it expires, and the scan. Deleting removes the file
+// too. Anything with a future expiry shows up on the Dashboard card once it
+// is within 60 days; the Ops vehicle log reads the driver's-licence rows.
+// ---------------------------------------------------------------------------
+function EmployeeQualificationsModal({ companyId, employee, rows, onClose, onAdd, onRemove }) {
+  const blank = { kind: 'drivers_licence', category: 'B', title: '', doc_number: '', issued_on: '', expires_on: '', note: '' }
+  const [form, setForm] = useState(blank)
+  const [file, setFile] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [confirmId, setConfirmId] = useState(null)
+  const kindDef = QUALIFICATION_KINDS.find((k) => k.id === form.kind)
+
+  async function save(e) {
+    e.preventDefault()
+    setError('')
+    if (form.expires_on && form.issued_on && form.expires_on < form.issued_on) { setError('Expiry is before the issue date.'); return }
+    setSaving(true)
+    let storagePath = null
+    try {
+      if (file) storagePath = await uploadQualificationFile({ supabase, companyId, file })
+      const { data: { user } } = await supabase.auth.getUser()
+      const [row] = await sb.insert('hr_qualifications', {
+        company_id: companyId,
+        employee_id: employee.id,
+        kind: form.kind,
+        category: kindDef?.hasClass ? form.category || null : null,
+        title: form.title.trim() || null,
+        doc_number: form.doc_number.trim() || null,
+        issued_on: form.issued_on || null,
+        expires_on: form.expires_on || null,
+        storage_path: storagePath,
+        note: form.note.trim() || null,
+        created_by: user?.id || null,
+      })
+      onAdd(row)
+      setForm(blank)
+      setFile(null)
+    } catch (err) {
+      // The row failed after the file went up: take the file down again so
+      // the bucket does not collect orphans.
+      if (storagePath) await removeQualificationFile({ supabase, storagePath }).catch(() => {})
+      setError(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function remove(q) {
+    setError('')
+    try {
+      await sb.remove('hr_qualifications', { id: q.id })
+      if (q.storage_path) await removeQualificationFile({ supabase, storagePath: q.storage_path }).catch(() => {})
+      onRemove(q.id)
+    } catch (err) {
+      setError(err.message)
+    }
+    setConfirmId(null)
+  }
+
+  async function open(q) {
+    try {
+      const url = await qualificationFileUrl({ supabase, storagePath: q.storage_path })
+      window.open(url, '_blank', 'noopener')
+    } catch (err) {
+      setError(`Could not open the document: ${err.message}`)
+    }
+  }
+
+  const sorted = [...rows].sort((a, b) => String(a.expires_on || '9999').localeCompare(String(b.expires_on || '9999')))
+
+  return (
+    <div
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+      onClick={onClose}
+    >
+      <div style={{ ...styles.card, maxWidth: 680, width: '100%', maxHeight: '85vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ ...styles.row, justifyContent: 'space-between' }}>
+          <div style={styles.cardTitle}>
+            {employee.first_name} {employee.last_name} — licences & qualifications
+          </div>
+          <button style={styles.buttonGhost} onClick={onClose}>Close</button>
+        </div>
+
+        {error && <div style={{ ...styles.banner, marginTop: 8 }}>{error}</div>}
+
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Document</th>
+                <th style={styles.th}>Number</th>
+                <th style={styles.th}>Issued</th>
+                <th style={styles.th}>Expires</th>
+                <th style={styles.th}>Status</th>
+                <th style={styles.th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((q) => {
+                const st = expiryStatus(q)
+                return (
+                  <tr key={q.id}>
+                    <td style={styles.td}>
+                      {describeQualification(q)}
+                      {q.note ? <div style={{ fontSize: 11, color: colors.muted, whiteSpace: 'normal' }}>{q.note}</div> : null}
+                    </td>
+                    <td style={styles.td}>{q.doc_number || '—'}</td>
+                    <td style={styles.td}>{q.issued_on || '—'}</td>
+                    <td style={styles.td}>{q.expires_on || '—'}</td>
+                    <td style={styles.td}>
+                      <span style={styles.badge(st === 'expired' ? 'bad' : st === 'ok' || st === 'none' ? 'good' : 'neutral')}>{expiryLabel(q)}</span>
+                    </td>
+                    <td style={{ ...styles.td, textAlign: 'right' }}>
+                      {q.storage_path ? (
+                        <button style={styles.buttonGhost} onClick={() => open(q)}>Open</button>
+                      ) : (
+                        <span style={{ fontSize: 11, color: colors.muted }}>no scan</span>
+                      )}{' '}
+                      {confirmId === q.id ? (
+                        <>
+                          <button style={styles.buttonDanger} onClick={() => remove(q)}>Confirm</button>{' '}
+                          <button style={styles.buttonGhost} onClick={() => setConfirmId(null)}>Keep</button>
+                        </>
+                      ) : (
+                        <button style={styles.buttonGhost} onClick={() => setConfirmId(q.id)}>Remove</button>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+              {sorted.length === 0 && (
+                <tr>
+                  <td style={styles.td} colSpan={6}>Nothing on file yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <form onSubmit={save} style={{ marginTop: 14 }}>
+          <div style={styles.cardTitle}>Add a document</div>
+          <div style={styles.formGrid}>
+            <div>
+              <label style={styles.label}>Type</label>
+              <select style={styles.input} value={form.kind} onChange={(e) => setForm((f) => ({ ...f, kind: e.target.value, category: e.target.value === 'drivers_licence' ? 'B' : '' }))}>
+                {QUALIFICATION_KINDS.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
+              </select>
+            </div>
+            {kindDef?.hasClass && (
+              <div>
+                <label style={styles.label}>{form.kind === 'drivers_licence' ? 'Licence code' : 'Level / class'}</label>
+                {form.kind === 'drivers_licence' ? (
+                  <select style={styles.input} value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}>
+                    {LICENCE_CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                ) : (
+                  <input style={styles.input} value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))} placeholder="e.g. Level 1" />
+                )}
+              </div>
+            )}
+            <div>
+              <label style={styles.label}>Title (optional)</label>
+              <input style={styles.input} value={form.title} onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} placeholder={KIND_LABEL[form.kind]} />
+            </div>
+            <div>
+              <label style={styles.label}>Number</label>
+              <input style={styles.input} value={form.doc_number} onChange={(e) => setForm((f) => ({ ...f, doc_number: e.target.value }))} />
+            </div>
+            <div>
+              <label style={styles.label}>Issued on</label>
+              <input type="date" style={styles.input} value={form.issued_on} onChange={(e) => setForm((f) => ({ ...f, issued_on: e.target.value }))} />
+            </div>
+            <div>
+              <label style={styles.label}>Expires on (blank = never)</label>
+              <input type="date" style={styles.input} value={form.expires_on} onChange={(e) => setForm((f) => ({ ...f, expires_on: e.target.value }))} />
+            </div>
+            <div>
+              <label style={styles.label}>Scan / photo (jpg, png, pdf)</label>
+              <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" style={styles.input} onChange={(e) => setFile(e.target.files?.[0] || null)} />
+            </div>
+            <div>
+              <label style={styles.label}>Note</label>
+              <input style={styles.input} value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} />
+            </div>
+          </div>
+          <button type="submit" style={{ ...styles.button, marginTop: 8 }} disabled={saving}>
+            {saving ? 'Saving…' : 'Add document'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Appraisals (#486) — HR Admin only. One employee at a time: the pack on
+// screen, a print-to-PDF of the same pack on a clean white page, position
+// requirements editable alongside, and the notes from this conversation
+// saved so the next one starts from them.
+// ---------------------------------------------------------------------------
+function AppraisalsTab({ companyId, companyName, employees, contracts, qualifications, leave, rosteredOffDays, bonuses, shiftPatterns, scheduleLocations = [], guestFeedback = [], feedbackSettings = null }) {
+  const yearAgo = fmtDateOnly(addDays(parseDateOnly(todayStr()), -365))
+  const [employeeId, setEmployeeId] = useState('')
+  const [from, setFrom] = useState(yearAgo)
+  const [to, setTo] = useState(todayStr())
+  const [requirements, setRequirements] = useState([])   // hr_position_requirements rows
+  const [appraisals, setAppraisals] = useState([])       // hr_appraisals rows
+  const [reqForm, setReqForm] = useState({ requirements: '', required_qualifications: '' })
+  const [note, setNote] = useState({ appraiser: '', rating: '', strengths: '', development: '', agreed_actions: '', notes: '' })
+  const [msg, setMsg] = useState('')
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    sb.select('hr_position_requirements', { company_id: companyId }, { order: 'position.asc' }).then((r) => setRequirements(r || [])).catch(() => setRequirements([]))
+    sb.select('hr_appraisals', { company_id: companyId }, { order: 'appraisal_date.desc' }).then((r) => setAppraisals(r || [])).catch(() => setAppraisals([]))
+  }, [companyId])
+
+  const employee = employees.find((e) => e.id === employeeId) || null
+  const position = employee?.position?.trim() || ''
+  const reqRow = requirements.find((r) => r.position === position) || null
+  useEffect(() => {
+    setReqForm({ requirements: reqRow?.requirements || '', required_qualifications: reqRow?.required_qualifications || '' })
+    setMsg(''); setError('')
+  }, [reqRow?.id, employeeId])
+
+  const patternsById = useMemo(() => Object.fromEntries((shiftPatterns || []).map((p) => [p.id, p])), [shiftPatterns])
+
+  const pack = useMemo(() => {
+    if (!employee) return null
+    return buildAppraisalPack({
+      employee,
+      contract: currentContract(employee.id, contracts),
+      position,
+      requirements: reqRow,
+      qualifications: qualifications.filter((q) => q.employee_id === employee.id),
+      leaveRows: leave,
+      offDays: rosteredOffDays,
+      bonuses,
+      previousAppraisals: appraisals,
+      patternText: describePattern(patternFor(employee, patternsById)),
+      from, to, asOf: todayStr(),
+      // Guest feedback (#487): the DEPARTMENT's trend at the lodges this
+      // person was rostered at — context for the conversation, not a score
+      // against them. Empty until the company maps a category to their
+      // department on the Guest Feedback tab.
+      feedbackTrend: departmentTrend({ feedback: guestFeedback, categoryDepartments: feedbackSettings?.category_departments || {}, department: employee.department, employeeId: employee.id, scheduleLocations, from, to }),
+    })
+  }, [employee, contracts, position, reqRow, qualifications, leave, rosteredOffDays, bonuses, appraisals, patternsById, from, to, guestFeedback, feedbackSettings, scheduleLocations])
+
+  async function saveRequirements(e) {
+    e.preventDefault()
+    if (!position) return
+    setSaving(true); setError('')
+    try {
+      const [row] = await sb.upsert('hr_position_requirements', { company_id: companyId, position, requirements: reqForm.requirements.trim() || null, required_qualifications: reqForm.required_qualifications.trim() || null, updated_at: new Date().toISOString() }, 'company_id,position')
+      setRequirements((prev) => [...prev.filter((r) => r.position !== position), row])
+      setMsg(`Requirements for "${position}" saved — they apply to everyone in that position.`)
+    } catch (err) { setError(err.message) } finally { setSaving(false) }
+  }
+
+  async function saveAppraisal(e) {
+    e.preventDefault()
+    if (!employee) return
+    setSaving(true); setError('')
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      const [row] = await sb.insert('hr_appraisals', {
+        company_id: companyId, employee_id: employee.id, appraisal_date: todayStr(), period_from: from, period_to: to,
+        appraiser: note.appraiser.trim() || null, rating: note.rating.trim() || null,
+        strengths: note.strengths.trim() || null, development: note.development.trim() || null,
+        agreed_actions: note.agreed_actions.trim() || null, notes: note.notes.trim() || null, created_by: user?.id || null,
+      })
+      setAppraisals((prev) => [row, ...prev])
+      setNote({ appraiser: note.appraiser, rating: '', strengths: '', development: '', agreed_actions: '', notes: '' })
+      setMsg('Appraisal saved. It will show under "Previous appraisals" next time.')
+    } catch (err) { setError(err.message) } finally { setSaving(false) }
+  }
+
+  function printPack() {
+    if (!pack) return
+    const w = window.open('', '_blank', 'noopener,width=900,height=1000')
+    if (!w) { setError('The browser blocked the print window — allow pop-ups for this site.'); return }
+    w.document.write(appraisalHtml(pack, { companyName, preparedBy: note.appraiser }))
+    w.document.close()
+    w.focus()
+    setTimeout(() => w.print(), 300)
+  }
+
+  const Check = ({ ok }) => <span style={styles.badge(ok ? 'good' : 'bad')}>{ok ? '✓' : '✗'}</span>
+
+  return (
+    <>
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Appraisal pack</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+          Everything worth having in front of you for the conversation — contract, what the position asks against what they hold,
+          leave and sick record, working pattern, bonuses, and last time's notes. HR Admin only: it contains sick-leave records.
+          "Download" prints the same pack to PDF on a white page.
+        </div>
+        <div style={styles.formGrid}>
+          <div>
+            <label style={styles.label}>Employee</label>
+            <select style={styles.input} value={employeeId} onChange={(e) => setEmployeeId(e.target.value)}>
+              <option value="">Pick an employee…</option>
+              {[...employees].sort((a, b) => `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`)).map((e) => (
+                <option key={e.id} value={e.id}>{e.first_name} {e.last_name}{e.position ? ` — ${e.position}` : ''}</option>
+              ))}
+            </select>
+          </div>
+          <div><label style={styles.label}>Period from</label><input type="date" style={styles.input} value={from} onChange={(e) => setFrom(e.target.value)} /></div>
+          <div><label style={styles.label}>Period to</label><input type="date" style={styles.input} value={to} onChange={(e) => setTo(e.target.value)} /></div>
+          <div style={{ alignSelf: 'end' }}>
+            <button style={styles.button} onClick={printPack} disabled={!pack}>Download / print pack</button>
+          </div>
+        </div>
+        {msg && <div style={{ ...styles.banner, marginTop: 8 }}>{msg}</div>}
+        {error && <div style={{ ...styles.banner, marginTop: 8, color: colors.danger }}>{error}</div>}
+      </div>
+
+      {employee && pack && (
+        <>
+          <div style={styles.card}>
+            <div style={styles.cardTitle}>{pack.name} — person and contract</div>
+            <table style={styles.table}><tbody>
+              {pack.person.map(([k, v]) => <tr key={k}><td style={{ ...styles.td, color: colors.muted, width: 200 }}>{k}</td><td style={styles.td}>{v}</td></tr>)}
+            </tbody></table>
+          </div>
+
+          <div style={styles.card}>
+            <div style={styles.cardTitle}>Position requirements — {position || 'no position set'}</div>
+            {position ? (
+              <form onSubmit={saveRequirements}>
+                <div style={styles.formGrid}>
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <label style={styles.label}>What the position asks (one per line)</label>
+                    <textarea style={{ ...styles.input, minHeight: 90, fontFamily: 'inherit' }} value={reqForm.requirements} onChange={(e) => setReqForm((f) => ({ ...f, requirements: e.target.value }))} placeholder={'e.g.\nGuides morning and afternoon drives\nFGASA Level 1\nFirst aid current'} />
+                  </div>
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <label style={styles.label}>Qualifications the app should tick off — comma-separated: drivers_licence:EC, pdp, first_aid, fgasa:1, firearm</label>
+                    <input style={styles.input} value={reqForm.required_qualifications} onChange={(e) => setReqForm((f) => ({ ...f, required_qualifications: e.target.value }))} placeholder="drivers_licence:B, first_aid" />
+                  </div>
+                </div>
+                <button type="submit" style={{ ...styles.button, marginTop: 8 }} disabled={saving}>Save requirements for "{position}"</button>
+              </form>
+            ) : (
+              <div style={{ fontSize: 12, color: colors.muted }}>Set a position on the employee first (Employees tab), then the requirements can be written for it.</div>
+            )}
+            {pack.checks.length > 0 && (
+              <table style={{ ...styles.table, marginTop: 10 }}><tbody>
+                {pack.checks.map((c) => <tr key={c.label}><td style={{ ...styles.td, width: 260 }}>{c.label}</td><td style={styles.td}><Check ok={c.met} /> {c.detail}</td></tr>)}
+              </tbody></table>
+            )}
+          </div>
+
+          <div style={styles.card}>
+            <div style={styles.cardTitle}>Leave in the period</div>
+            {Object.keys(pack.leave.byType).length === 0 ? <div style={{ fontSize: 12, color: colors.muted }}>No leave taken.</div> : (
+              <div style={{ ...styles.row, gap: 16, flexWrap: 'wrap' }}>
+                {Object.entries(pack.leave.byType).map(([t, d]) => (
+                  <div key={t}>
+                    <div style={{ fontSize: 20, fontFamily: fonts.mono, color: colors.goldLt }}>{d}</div>
+                    <div style={{ fontSize: 11, color: colors.muted }}>{LEAVE_TYPE_LABELS[t] || t}{t === 'sick' ? ` · ${pack.leave.sickEpisodes} episode${pack.leave.sickEpisodes === 1 ? '' : 's'}` : ''}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ fontSize: 12, marginTop: 8 }}>Pattern: {pack.pattern}{pack.extraOffDays.length ? ` · extra off days: ${pack.extraOffDays.map((d) => d.date).join(', ')}` : ''}</div>
+            {pack.bonuses.length > 0 && <div style={{ fontSize: 12, marginTop: 4 }}>Bonuses: {pack.bonuses.map((b) => `${b.date} R ${fmt(b.amount)}${b.type ? ` (${b.type})` : ''}`).join(' · ')}</div>}
+          </div>
+
+          <div style={styles.card}>
+            <div style={styles.cardTitle}>Licences & qualifications</div>
+            {pack.qualifications.length === 0 ? <div style={{ fontSize: 12, color: colors.muted }}>Nothing on file — add them under Employees → Licences.</div> : (
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                {pack.qualifications.map((q, i) => <li key={i}>{q.label} — <span style={{ color: q.expired ? colors.danger : colors.muted }}>{q.expired ? 'EXPIRED ' : 'expires '}{q.expires}</span></li>)}
+              </ul>
+            )}
+          </div>
+
+          {pack.feedbackTrend && pack.feedbackTrend.categories.length > 0 && (
+            <div style={styles.card}>
+              <div style={styles.cardTitle}>Guest feedback — {employee.department} trend ({pack.feedbackTrend.categories.join(', ')})</div>
+              <div style={{ fontSize: 11, color: colors.muted, marginBottom: 6 }}>
+                Average guest score for the department at the lodges where {employee.first_name} was rostered. A department's week, not a person's score.
+              </div>
+              {pack.feedbackTrend.months.length === 0 ? <div style={{ fontSize: 12, color: colors.muted }}>No feedback in the period.</div> : (
+                <div style={{ ...styles.row, gap: 14, flexWrap: 'wrap' }}>
+                  {pack.feedbackTrend.months.map((m) => (
+                    <div key={m.month}><div style={{ fontSize: 18, fontFamily: fonts.mono, color: colors.goldLt }}>{m.avg}</div><div style={{ fontSize: 11, color: colors.muted }}>{m.month} · {m.n} answers</div></div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={styles.card}>
+            <div style={styles.cardTitle}>Previous appraisals</div>
+            {pack.previous.length === 0 ? <div style={{ fontSize: 12, color: colors.muted }}>First appraisal on record.</div> : pack.previous.map((a) => (
+              <div key={a.id} style={{ fontSize: 13, marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${colors.border}` }}>
+                <strong>{a.appraisal_date}</strong>{a.appraiser ? ` — ${a.appraiser}` : ''}{a.rating ? ` — ${a.rating}` : ''}
+                {a.strengths && <div><span style={{ color: colors.muted }}>Strengths:</span> {a.strengths}</div>}
+                {a.development && <div><span style={{ color: colors.muted }}>Development:</span> {a.development}</div>}
+                {a.agreed_actions && <div><span style={{ color: colors.muted }}>Agreed:</span> {a.agreed_actions}</div>}
+                {a.notes && <div><span style={{ color: colors.muted }}>Notes:</span> {a.notes}</div>}
+              </div>
+            ))}
+          </div>
+
+          <div style={styles.card}>
+            <div style={styles.cardTitle}>This conversation</div>
+            <form onSubmit={saveAppraisal}>
+              <div style={styles.formGrid}>
+                <div><label style={styles.label}>Appraiser</label><input style={styles.input} value={note.appraiser} onChange={(e) => setNote((n) => ({ ...n, appraiser: e.target.value }))} /></div>
+                <div><label style={styles.label}>Rating (your scale)</label><input style={styles.input} value={note.rating} onChange={(e) => setNote((n) => ({ ...n, rating: e.target.value }))} placeholder="e.g. meets / exceeds / 4 of 5" /></div>
+                <div style={{ gridColumn: '1 / -1' }}><label style={styles.label}>Strengths</label><textarea style={{ ...styles.input, minHeight: 60, fontFamily: 'inherit' }} value={note.strengths} onChange={(e) => setNote((n) => ({ ...n, strengths: e.target.value }))} /></div>
+                <div style={{ gridColumn: '1 / -1' }}><label style={styles.label}>Development</label><textarea style={{ ...styles.input, minHeight: 60, fontFamily: 'inherit' }} value={note.development} onChange={(e) => setNote((n) => ({ ...n, development: e.target.value }))} /></div>
+                <div style={{ gridColumn: '1 / -1' }}><label style={styles.label}>Agreed actions</label><textarea style={{ ...styles.input, minHeight: 60, fontFamily: 'inherit' }} value={note.agreed_actions} onChange={(e) => setNote((n) => ({ ...n, agreed_actions: e.target.value }))} /></div>
+                <div style={{ gridColumn: '1 / -1' }}><label style={styles.label}>Notes</label><input style={styles.input} value={note.notes} onChange={(e) => setNote((n) => ({ ...n, notes: e.target.value }))} /></div>
+              </div>
+              <button type="submit" style={{ ...styles.button, marginTop: 8 }} disabled={saving}>Save appraisal</button>
+            </form>
+          </div>
+        </>
+      )}
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Guest feedback (#487). GuestRevu has no customer API (checked 2026-09-27),
+// so the feed is its Reviews-tab export: drop the CSV here, confirm which
+// column is which (remembered per company), import. Then: per lodge per
+// week, the department scores, with who was rostered that week alongside —
+// as context. Nothing here scores a person.
+// ---------------------------------------------------------------------------
+function GuestFeedbackTab({ companyId, employees, scheduleLocations, feedback, setFeedback, settings, setSettings }) {
+  const [parsed, setParsed] = useState(null)     // { headers, records }
+  const [map, setMap] = useState(null)
+  const [aliases, setAliases] = useState({})
+  const [catDept, setCatDept] = useState({})
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [error, setError] = useState('')
+  const [locFilter, setLocFilter] = useState('')
+  const [openWeek, setOpenWeek] = useState(null)
+
+  useEffect(() => {
+    setAliases(settings?.location_aliases || {})
+    setCatDept(settings?.category_departments || {})
+  }, [settings?.company_id])
+
+  const departments = useMemo(() => Array.from(new Set(employees.map((e) => e.department?.trim()).filter(Boolean))).sort(), [employees])
+  const knownLocations = LOCATIONS.map((l) => l.id)
+
+  function onFile(e) {
+    const f = e.target.files?.[0]
+    if (!f) return
+    setError(''); setMsg('')
+    f.text().then((text) => {
+      const p = parseCsv(text)
+      if (p.headers.length === 0) { setError('That file has no rows.'); return }
+      setParsed(p)
+      setMap(settings?.column_map?.stay_date ? { categories: {}, ...settings.column_map } : guessColumnMap(p.headers, p.records))
+    })
+  }
+
+  const preview = useMemo(() => (parsed && map ? normaliseRows(parsed.records, map, { locationAliases: aliases, knownLocations }) : null), [parsed, map, aliases, knownLocations])
+
+  async function doImport() {
+    if (!preview || !map?.stay_date) { setError('Pick the check-out / review date column first.'); return }
+    setBusy(true); setError(''); setMsg('')
+    try {
+      await sb.upsert('guest_feedback_settings', { company_id: companyId, column_map: map, category_departments: catDept, location_aliases: aliases, updated_at: new Date().toISOString() }, 'company_id')
+      setSettings({ company_id: companyId, column_map: map, category_departments: catDept, location_aliases: aliases })
+      const rows = preview.rows.map((r) => ({ ...r, company_id: companyId, source: 'guestrevu_export' }))
+      const withId = rows.filter((r) => r.external_id)
+      const without = rows.filter((r) => !r.external_id)
+      const saved = []
+      for (let i = 0; i < withId.length; i += 200) saved.push(...((await sb.upsert('guest_feedback', withId.slice(i, i + 200), 'company_id,external_id')) || []))
+      for (let i = 0; i < without.length; i += 200) saved.push(...((await sb.insert('guest_feedback', without.slice(i, i + 200))) || []))
+      const ids = new Set(saved.map((r) => r.id))
+      setFeedback((prev) => [...saved, ...prev.filter((r) => !ids.has(r.id))].sort((a, b) => String(b.stay_date).localeCompare(String(a.stay_date))))
+      setMsg(`Imported ${saved.length} response${saved.length === 1 ? '' : 's'}${preview.skipped.length ? `; ${preview.skipped.length} skipped (no usable date)` : ''}${without.length ? '. No ID column in this export, so re-importing the same file would duplicate — pick an ID column if the export has one.' : '.'}`)
+      setParsed(null); setMap(null)
+    } catch (err) { setError(err.message) } finally { setBusy(false) }
+  }
+
+  async function saveMapping() {
+    setBusy(true); setError('')
+    try {
+      await sb.upsert('guest_feedback_settings', { company_id: companyId, column_map: settings?.column_map || {}, category_departments: catDept, location_aliases: aliases, updated_at: new Date().toISOString() }, 'company_id')
+      setSettings({ ...(settings || { company_id: companyId, column_map: {} }), category_departments: catDept, location_aliases: aliases })
+      setMsg('Department mapping saved — the appraisal pack uses it.')
+    } catch (err) { setError(err.message) } finally { setBusy(false) }
+  }
+
+  const trend = useMemo(() => weeklyTrend(feedback, { locationId: locFilter || null }), [feedback, locFilter])
+  const allCats = useMemo(() => Array.from(new Set(feedback.flatMap((f) => Object.keys(f.scores || {})))).sort(), [feedback])
+  const tone = (v) => (v == null ? 'neutral' : v >= 8.5 ? 'good' : v < 7 ? 'bad' : 'neutral')
+  const fields = [['stay_date', 'Check-out / review date (required)'], ['location', 'Lodge / property'], ['overall', 'Overall score'], ['comment', 'Comment'], ['reviewer', 'Guest / source'], ['id', 'Response ID (prevents duplicates)']]
+
+  return (
+    <>
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Import a GuestRevu export</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 8, lineHeight: 1.5 }}>
+          GuestRevu has no customer API, so: in GuestRevu go to <strong>Reviews</strong>, set the date range, click <strong>Export</strong> and pick <strong>.csv</strong>. Drop that file here. The column choices are remembered, so the next export is one click.
+        </div>
+        <input type="file" accept=".csv,text/csv" onChange={onFile} style={styles.input} />
+        {parsed && map && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 12, color: colors.muted, marginBottom: 6 }}>{parsed.records.length} rows, {parsed.headers.length} columns. Confirm which column is which:</div>
+            <div style={styles.formGrid}>
+              {fields.map(([k, label]) => (
+                <div key={k}>
+                  <label style={styles.label}>{label}</label>
+                  <select style={styles.input} value={map[k] || ''} onChange={(e) => setMap((m) => ({ ...m, [k]: e.target.value || undefined }))}>
+                    <option value="">—</option>
+                    {parsed.headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
+            <div style={{ ...styles.cardTitle, marginTop: 10 }}>Score columns → categories</div>
+            <div style={styles.formGrid}>
+              {Object.keys(CATEGORY_GUESS).map((cat) => (
+                <div key={cat}>
+                  <label style={styles.label}>{cat}</label>
+                  <select style={styles.input} value={map.categories?.[cat] || ''} onChange={(e) => setMap((m) => ({ ...m, categories: { ...(m.categories || {}), [cat]: e.target.value || undefined } }))}>
+                    <option value="">—</option>
+                    {parsed.headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
+            {preview && preview.unmappedLocations.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div style={styles.cardTitle}>Lodge names in the file that are not lodge codes</div>
+                <div style={styles.formGrid}>
+                  {preview.unmappedLocations.map((name) => (
+                    <div key={name}>
+                      <label style={styles.label}>"{name}" is</label>
+                      <select style={styles.input} value={aliases[name] || ''} onChange={(e) => setAliases((a) => ({ ...a, [name]: e.target.value }))}>
+                        <option value="">— leave unassigned —</option>
+                        {LOCATIONS.map((l) => <option key={l.id} value={l.id}>{l.name} ({l.id})</option>)}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {preview && (
+              <div style={{ fontSize: 12, marginTop: 8 }}>
+                Ready: {preview.rows.length} responses{preview.skipped.length ? `, ${preview.skipped.length} without a usable date` : ''}.
+                {preview.rows.length > 0 && ` First: ${preview.rows[0].stay_date} ${preview.rows[0].location_id || '(no lodge)'} overall ${preview.rows[0].overall ?? '—'}, ${Object.keys(preview.rows[0].scores).length} category scores.`}
+              </div>
+            )}
+            <button style={{ ...styles.button, marginTop: 8 }} onClick={doImport} disabled={busy || !map.stay_date}>{busy ? 'Importing…' : 'Import'}</button>
+          </div>
+        )}
+        {msg && <div style={{ ...styles.banner, marginTop: 8 }}>{msg}</div>}
+        {error && <div style={{ ...styles.banner, marginTop: 8, color: colors.danger }}>{error}</div>}
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Which department owns which category</div>
+        <div style={{ fontSize: 12, color: colors.muted, marginBottom: 8 }}>Food → the kitchen, cleanliness → housekeeping, activities → guiding. This is what lets the appraisal pack show a department's trend.</div>
+        <div style={styles.formGrid}>
+          {(allCats.length ? allCats : Object.keys(CATEGORY_GUESS)).map((cat) => (
+            <div key={cat}>
+              <label style={styles.label}>{cat}</label>
+              <select style={styles.input} value={catDept[cat] || ''} onChange={(e) => setCatDept((c) => ({ ...c, [cat]: e.target.value }))}>
+                <option value="">— not a department —</option>
+                {departments.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </div>
+          ))}
+        </div>
+        <button style={{ ...styles.button, marginTop: 8 }} onClick={saveMapping} disabled={busy}>Save mapping</button>
+      </div>
+
+      <div style={styles.card}>
+        <div style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <div style={styles.cardTitle}>Scores by week — {feedback.length} response{feedback.length === 1 ? '' : 's'} on file</div>
+          <select style={styles.smallInput} value={locFilter} onChange={(e) => setLocFilter(e.target.value)}>
+            <option value="">All lodges</option>
+            {LOCATIONS.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+        </div>
+        {trend.length === 0 ? <div style={{ fontSize: 12, color: colors.muted }}>Nothing imported yet.</div> : (
+          <div style={styles.tableWrap}>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>Lodge</th><th style={styles.th}>Week of</th><th style={styles.th}>Responses</th><th style={styles.th}>Overall</th>
+                  {allCats.map((c) => <th key={c} style={styles.th}>{c}{catDept[c] ? <span style={{ color: colors.muted, fontWeight: 400 }}> · {catDept[c]}</span> : ''}</th>)}
+                  <th style={styles.th}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {trend.slice(-60).reverse().map((w) => {
+                  const key = `${w.location_id}|${w.week}`
+                  const roster = openWeek === key ? rosterForWeek(scheduleLocations, employees, { locationId: w.location_id, week: w.week }) : null
+                  return (
+                    <Fragment key={key}>
+                      <tr>
+                        <td style={styles.td}>{w.location_id}</td>
+                        <td style={styles.td}>{w.week}</td>
+                        <td style={styles.td}>{w.responses}</td>
+                        <td style={styles.td}><span style={styles.badge(tone(w.overall))}>{w.overall ?? '—'}</span></td>
+                        {allCats.map((c) => <td key={c} style={styles.td}>{w.categories[c] ? <span style={styles.badge(tone(w.categories[c].avg))}>{w.categories[c].avg}</span> : <span style={{ color: colors.muted }}>—</span>}</td>)}
+                        <td style={styles.td}><button style={styles.buttonGhost} onClick={() => setOpenWeek(openWeek === key ? null : key)}>{openWeek === key ? 'Hide roster' : 'Who was on'}</button></td>
+                      </tr>
+                      {roster && (
+                        <tr>
+                          <td style={{ ...styles.td, whiteSpace: 'normal', fontSize: 12 }} colSpan={5 + allCats.length}>
+                            {Object.keys(roster).length === 0 ? <span style={{ color: colors.muted }}>Nobody rostered at {w.location_id} that week in the Schedule.</span> : (
+                              Object.entries(roster).map(([dept, names]) => <div key={dept}><strong>{dept}:</strong> {names.join(', ')}</div>)
+                            )}
+                            <div style={{ color: colors.muted, marginTop: 4 }}>Rostered that week — context for the department's score, not a finding about anyone.</div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </>
   )
 }
