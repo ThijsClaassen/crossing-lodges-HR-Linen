@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path'
 const traverse = traverseModule.default || traverseModule
 const here = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(here, '..', 'src', 'App.jsx'), 'utf8')
+
 const theme = readFileSync(join(here, '..', 'src', 'theme.js'), 'utf8')
 
 let failed = 0
@@ -107,6 +108,16 @@ check('drawer writes the item then upserts the stock row on the right conflict k
 check('Uniforms mounts it company-wide; Linen per lodge', /kind="uniform" table="hr_uniform_items" stockTable="hr_uniform_stock" stockConflict="item_id"/.test(src) && /kind="linen" table="hr_linen_items" stockTable="hr_linen_stock" stockConflict="item_id,location_id"/.test(src))
 check('old inline-input stock tables are gone', !/onBlur=\{\(e\) => saveStock\(/.test(src) && !/onBlur=\{\(e\) => saveStockField\(/.test(src))
 check('issue-an-item and log-a-movement forms untouched (staff one-screen forms)', /Issue an item/.test(src) && /Log a movement — \{location\}/.test(src))
+
+// The drawer grows to fit its content instead of scrolling sideways (2026-09-28).
+{
+  const drawerSrc = src
+  const fit = drawerSrc.slice(drawerSrc.indexOf('function Drawer('), drawerSrc.indexOf('function Drawer(') + 4000)
+  const okFit = /const overflow = el\.scrollWidth - el\.clientWidth/.test(fit) && /setFitWidth\(/.test(fit) && /window\.innerWidth - 250/.test(fit) && /new ResizeObserver\(measure\)/.test(fit) && /style=\{fitWidth \? \{ width: fitWidth \} : undefined\}/.test(fit) && /className="drawer-body" ref=\{bodyRef\}/.test(fit)
+  const okMobile = /window\.innerWidth <= 768\) return/.test(fit)
+  check('drawer widens itself when its content would scroll sideways (capped at screen minus sidebar)', okFit)
+  check('drawer never grows past a phone or tablet screen', okMobile)
+}
 
 console.log(failed ? `\n${failed} check(s) failed` : '\nall employee drawer checks pass')
 process.exit(failed ? 1 : 0)
