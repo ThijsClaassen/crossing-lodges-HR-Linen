@@ -84,7 +84,7 @@ export function leaveInPeriod(leaveRows, employeeId, from, to) {
 
 export function buildAppraisalPack({
   employee, contract, position, requirements, qualifications = [], leaveRows = [], offDays = [], bonuses = [],
-  previousAppraisals = [], patternText, from, to, asOf, feedbackTrend = null,
+  previousAppraisals = [], patternText, from, to, asOf, feedbackTrend = null, memberFeedback = null,
 }) {
   const name = `${employee.first_name || ''} ${employee.last_name || ''}`.trim()
   const req = parseRequiredQualifications(requirements?.required_qualifications)
@@ -117,6 +117,9 @@ export function buildAppraisalPack({
     bonuses: bonus.map((b) => ({ date: String(b.bonus_date).slice(0, 10), amount: Number(b.amount || 0), type: b.bonus_type || '', note: b.note || '' })),
     // Guest feedback (#487): the department's trend, never a personal score.
     feedbackTrend: feedbackTrend && feedbackTrend.categories?.length ? feedbackTrend : null,
+    // Member reviews (#519): the person's own averages, floored, next to the
+    // department's. Averages only — the members' comments stay in the app.
+    memberFeedback: memberFeedback && memberFeedback.questions?.length && (memberFeedback.employee.n > 0 || memberFeedback.department.n > 0) ? memberFeedback : null,
     previous: (previousAppraisals || [])
       .filter((a) => a.employee_id === employee.id)
       .sort((a, b) => String(b.appraisal_date).localeCompare(String(a.appraisal_date)))
@@ -171,6 +174,13 @@ ${pack.bonuses.length ? `<table>${pack.bonuses.map((b) => row(`${b.date}${b.type
 ${pack.feedbackTrend ? `<h2>Guest feedback — department trend (${esc(pack.feedbackTrend.categories.join(', '))})</h2>
 <p style="color:#555;margin:0 0 6px">Average guest score for the department at the lodges where this person was rostered. It describes the department's weeks, not the person.</p>
 ${pack.feedbackTrend.months.length ? `<table>${pack.feedbackTrend.months.map((m) => row(m.month, `${m.avg} (${m.n} answers)`)).join('')}</table>` : '<p><em>No feedback in the period.</em></p>'}` : ''}
+
+${pack.memberFeedback ? `<h2>Member reviews of visits</h2>
+<p style="color:#555;margin:0 0 6px">Members rate each staff visit to their plot, 1–5. ${pack.memberFeedback.employee.shown ? `${esc(pack.name)}: ${pack.memberFeedback.employee.n} reviews in the period.` : `${esc(pack.name)} has ${pack.memberFeedback.employee.n} review${pack.memberFeedback.employee.n === 1 ? '' : 's'} in the period — fewer than ${pack.memberFeedback.minCount}, so no personal figure is shown.`} Department (${esc(pack.memberFeedback.department.name || '—')}): ${pack.memberFeedback.department.n} reviews.</p>
+<table><tr><th style="width:auto">Question</th><th style="width:auto" class="n">${esc(pack.name)}</th><th style="width:auto" class="n">Department</th></tr>
+${pack.memberFeedback.questions.map((q) => `<tr><td>${esc(q.label)}</td><td class="n">${pack.memberFeedback.employee.shown ? (pack.memberFeedback.employee.avg[q.key] ?? '—') : '·'}</td><td class="n">${pack.memberFeedback.department.avg[q.key] ?? '—'}</td></tr>`).join('')}
+<tr><td><strong>Overall</strong></td><td class="n"><strong>${pack.memberFeedback.employee.shown ? (pack.memberFeedback.employee.overall ?? '—') : '·'}</strong></td><td class="n"><strong>${pack.memberFeedback.department.overall ?? '—'}</strong></td></tr></table>
+${pack.memberFeedback.months.length ? `<table style="margin-top:8px">${pack.memberFeedback.months.map((m) => row(m.month, `${m.avg} (${m.n} review${m.n === 1 ? '' : 's'})`)).join('')}</table>` : ''}` : ''}
 
 <h2>Previous appraisals</h2>
 ${pack.previous.length ? pack.previous.map((a) => `<table>${row('Date', `${a.appraisal_date}${a.appraiser ? ` — ${a.appraiser}` : ''}${a.rating ? ` — ${a.rating}` : ''}`)}${a.strengths ? row('Strengths', a.strengths) : ''}${a.development ? row('Development', a.development) : ''}${a.agreed_actions ? row('Agreed actions', a.agreed_actions) : ''}${a.notes ? row('Notes', a.notes) : ''}</table><br>`).join('') : '<p><em>First appraisal on record.</em></p>'}

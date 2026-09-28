@@ -218,3 +218,55 @@ export function departmentTrend({ feedback, categoryDepartments, department, emp
     months: Object.entries(months).sort(([a], [b]) => a.localeCompare(b)).map(([month, m]) => ({ month, avg: Math.round((m.sum / m.n) * 10) / 10, n: m.n })),
   }
 }
+
+// --- Member reviews of staff visits (#519) ------------------------------------
+// The LL members rate each staff visit to their plot (member_visit_reviews,
+// written by the member portal; questions in member_review_questions). Unlike
+// guest feedback this IS about a named person — the member watched them
+// work — so the appraisal shows the employee's own averages next to the
+// department's. With a FLOOR: no personal figure under `minCount` reviews in
+// the period; the department line always shows.
+export const MEMBER_REVIEW_MIN_COUNT = 3
+const round1 = (n) => Math.round(n * 10) / 10
+
+export function reviewOverall(scores) {
+  const vals = Object.values(scores || {}).map(Number).filter((n) => n >= 1 && n <= 5)
+  return vals.length ? round1(vals.reduce((a, b) => a + b, 0) / vals.length) : null
+}
+
+export function memberFeedback({ reviews = [], questions = [], employeeId, department, employees = [], from, to, minCount = MEMBER_REVIEW_MIN_COUNT }) {
+  const qs = (questions || []).filter((q) => q.active !== false).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || String(a.label).localeCompare(String(b.label))).map((q) => ({ key: q.key, label: q.label }))
+  const deptOf = Object.fromEntries((employees || []).map((e) => [e.id, (e.department || '').trim()]))
+  const inPeriod = (reviews || []).filter((r) => (!from || r.visit_date >= from) && (!to || r.visit_date <= to))
+  const mine = inPeriod.filter((r) => r.employee_id === employeeId)
+  const dept = department ? inPeriod.filter((r) => deptOf[r.employee_id] === department.trim()) : []
+
+  const agg = (rows, floor) => {
+    const n = rows.length
+    const shown = n >= floor
+    const avg = {}
+    for (const q of qs) {
+      const vals = rows.map((r) => Number(r.scores?.[q.key])).filter((v) => v >= 1 && v <= 5)
+      avg[q.key] = shown && vals.length ? round1(vals.reduce((a, b) => a + b, 0) / vals.length) : null
+    }
+    const overalls = rows.map((r) => reviewOverall(r.scores)).filter((v) => v != null)
+    return { n, shown, avg, overall: shown && overalls.length ? round1(overalls.reduce((a, b) => a + b, 0) / overalls.length) : null }
+  }
+  const months = {}
+  for (const r of mine) {
+    const o = reviewOverall(r.scores)
+    if (o == null) continue
+    const mo = String(r.visit_date).slice(0, 7)
+    const m = months[mo] || (months[mo] = { sum: 0, n: 0 })
+    m.sum += o; m.n++
+  }
+  const employee = agg(mine, minCount)
+  return {
+    questions: qs,
+    minCount,
+    employee,
+    department: { name: department || '', ...agg(dept, 1) },
+    months: employee.shown ? Object.entries(months).sort(([a], [b]) => a.localeCompare(b)).map(([month, m]) => ({ month, avg: round1(m.sum / m.n), n: m.n })) : [],
+    comments: mine.filter((r) => r.comment).sort((a, b) => String(b.visit_date).localeCompare(String(a.visit_date))).map((r) => ({ date: r.visit_date, overall: reviewOverall(r.scores), comment: r.comment })),
+  }
+}

@@ -28,7 +28,7 @@ import {
   describeQualification, bestLicence, uploadQualificationFile, qualificationFileUrl, removeQualificationFile,
 } from './qualifications.js'
 import { buildAppraisalPack, appraisalHtml } from './appraisal.js'
-import { parseCsv, guessColumnMap, normaliseRows, weeklyTrend, rosterForWeek, departmentTrend, CATEGORY_GUESS } from './guestFeedback.js'
+import { parseCsv, guessColumnMap, normaliseRows, weeklyTrend, rosterForWeek, departmentTrend, CATEGORY_GUESS, memberFeedback, reviewOverall, MEMBER_REVIEW_MIN_COUNT } from './guestFeedback.js'
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -582,6 +582,8 @@ function AuthenticatedApp() {
   const [qualifications, setQualifications] = useState([])
   // Guest feedback (#487): imported GuestRevu exports + the company's mapping.
   const [guestFeedback, setGuestFeedback] = useState([])
+  const [memberReviews, setMemberReviews] = useState([])          // #519, LL only
+  const [reviewQuestions, setReviewQuestions] = useState([])
   const [feedbackSettings, setFeedbackSettings] = useState(null)
 
   const [employees, setEmployees] = useState([])
@@ -721,6 +723,12 @@ function AuthenticatedApp() {
       setGuestFeedback(fbRes || [])
       const fbSet = await sb.select('guest_feedback_settings', { company_id: companyId }, {}).catch(() => [])
       setFeedbackSettings(fbSet?.[0] || null)
+      // Member reviews of staff visits (#519). Only companies with member
+      // billing have any; .catch until add_member_visit_reviews.sql has run.
+      const mrRes = await sb.select('member_visit_reviews', { company_id: companyId }, { order: 'visit_date.desc' }).catch(() => [])
+      setMemberReviews(mrRes || [])
+      const rqRes = await sb.select('member_review_questions', { company_id: companyId }, { order: 'sort_order.asc' }).catch(() => [])
+      setReviewQuestions(rqRes || [])
       setContracts(conRes || [])
       setLoans(loanRes || [])
       setBonuses(bonusRes || [])
@@ -1171,6 +1179,10 @@ function AuthenticatedApp() {
                 setFeedback={setGuestFeedback}
                 settings={feedbackSettings}
                 setSettings={setFeedbackSettings}
+                memberReviews={memberReviews}
+                reviewQuestions={reviewQuestions}
+                setReviewQuestions={setReviewQuestions}
+                role={role}
               />
             )}
             {activeTab === 'appraisals' && role === 'hradmin' && (
@@ -1187,6 +1199,8 @@ function AuthenticatedApp() {
                 scheduleLocations={scheduleLocations}
                 guestFeedback={guestFeedback}
                 feedbackSettings={feedbackSettings}
+                memberReviews={memberReviews}
+                reviewQuestions={reviewQuestions}
               />
             )}
             {activeTab === 'loans' && role === 'hradmin' && (
@@ -6058,7 +6072,7 @@ function EmployeeQualificationsModal({ companyId, employee, rows, onClose, onAdd
 // requirements editable alongside, and the notes from this conversation
 // saved so the next one starts from them.
 // ---------------------------------------------------------------------------
-function AppraisalsTab({ companyId, companyName, employees, contracts, qualifications, leave, rosteredOffDays, bonuses, shiftPatterns, scheduleLocations = [], guestFeedback = [], feedbackSettings = null }) {
+function AppraisalsTab({ companyId, companyName, employees, contracts, qualifications, leave, rosteredOffDays, bonuses, shiftPatterns, scheduleLocations = [], guestFeedback = [], feedbackSettings = null, memberReviews = [], reviewQuestions = [] }) {
   const yearAgo = fmtDateOnly(addDays(parseDateOnly(todayStr()), -365))
   const [employeeId, setEmployeeId] = useState('')
   const [from, setFrom] = useState(yearAgo)
@@ -6105,8 +6119,11 @@ function AppraisalsTab({ companyId, companyName, employees, contracts, qualifica
       // against them. Empty until the company maps a category to their
       // department on the Guest Feedback tab.
       feedbackTrend: departmentTrend({ feedback: guestFeedback, categoryDepartments: feedbackSettings?.category_departments || {}, department: employee.department, employeeId: employee.id, scheduleLocations, from, to }),
+      // Member reviews (#519): this person's own averages (from 3 reviews)
+      // next to the department's. Comments stay on the Guest Feedback tab.
+      memberFeedback: memberFeedback({ reviews: memberReviews, questions: reviewQuestions, employeeId: employee.id, department: employee.department, employees, from, to }),
     })
-  }, [employee, contracts, position, reqRow, qualifications, leave, rosteredOffDays, bonuses, appraisals, patternsById, from, to, guestFeedback, feedbackSettings, scheduleLocations])
+  }, [employee, contracts, position, reqRow, qualifications, leave, rosteredOffDays, bonuses, appraisals, patternsById, from, to, guestFeedback, feedbackSettings, scheduleLocations, memberReviews, reviewQuestions, employees])
 
   async function saveRequirements(e) {
     e.preventDefault()
@@ -6254,6 +6271,33 @@ function AppraisalsTab({ companyId, companyName, employees, contracts, qualifica
             </div>
           )}
 
+          {pack.memberFeedback && (
+            <div style={styles.card}>
+              <div style={styles.cardTitle}>Member reviews of visits</div>
+              <div style={{ fontSize: 11, color: colors.muted, marginBottom: 6 }}>
+                {pack.memberFeedback.employee.shown
+                  ? `${employee.first_name}: ${pack.memberFeedback.employee.n} reviews in the period, next to the ${employee.department || 'department'} average (${pack.memberFeedback.department.n}).`
+                  : `${employee.first_name} has ${pack.memberFeedback.employee.n} review${pack.memberFeedback.employee.n === 1 ? '' : 's'} in the period — a personal figure shows from ${pack.memberFeedback.minCount}. Department average shown for context.`}
+              </div>
+              <table style={styles.table}>
+                <thead><tr><th style={styles.th}>Question</th><th style={styles.th}>{employee.first_name}</th><th style={styles.th}>{employee.department || 'Department'}</th></tr></thead>
+                <tbody>
+                  {pack.memberFeedback.questions.map((q) => (
+                    <tr key={q.key}><td style={styles.td}>{q.label}</td><td style={{ ...styles.td, fontFamily: fonts.mono, color: colors.goldLt }}>{pack.memberFeedback.employee.shown ? (pack.memberFeedback.employee.avg[q.key] ?? '—') : '·'}</td><td style={{ ...styles.td, fontFamily: fonts.mono }}>{pack.memberFeedback.department.avg[q.key] ?? '—'}</td></tr>
+                  ))}
+                  <tr><td style={{ ...styles.td, fontWeight: 600 }}>Overall</td><td style={{ ...styles.td, fontFamily: fonts.mono, color: colors.goldLt, fontWeight: 600 }}>{pack.memberFeedback.employee.shown ? (pack.memberFeedback.employee.overall ?? '—') : '·'}</td><td style={{ ...styles.td, fontFamily: fonts.mono, fontWeight: 600 }}>{pack.memberFeedback.department.overall ?? '—'}</td></tr>
+                </tbody>
+              </table>
+              {pack.memberFeedback.months.length > 0 && (
+                <div style={{ ...styles.row, gap: 14, flexWrap: 'wrap', marginTop: 8 }}>
+                  {pack.memberFeedback.months.map((m) => (
+                    <div key={m.month}><div style={{ fontSize: 18, fontFamily: fonts.mono, color: colors.goldLt }}>{m.avg}</div><div style={{ fontSize: 11, color: colors.muted }}>{m.month} · {m.n} review{m.n === 1 ? '' : 's'}</div></div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           <div style={styles.card}>
             <div style={styles.cardTitle}>Previous appraisals</div>
             {pack.previous.length === 0 ? <div style={{ fontSize: 12, color: colors.muted }}>First appraisal on record.</div> : pack.previous.map((a) => (
@@ -6294,7 +6338,126 @@ function AppraisalsTab({ companyId, companyName, employees, contracts, qualifica
 // week, the department scores, with who was rostered that week alongside —
 // as context. Nothing here scores a person.
 // ---------------------------------------------------------------------------
-function GuestFeedbackTab({ companyId, employees, scheduleLocations, feedback, setFeedback, settings, setSettings }) {
+// ---------------------------------------------------------------------------
+// MEMBER REVIEWS (#519) — LL members rate each staff visit to their plot in
+// the member portal. Shown only for a company that has any questions (i.e.
+// member billing). Per-employee averages from MEMBER_REVIEW_MIN_COUNT
+// reviews; the members' comments in full (they never print in the pack);
+// and the question list itself, which HR can rename, add to or retire.
+// ---------------------------------------------------------------------------
+function MemberReviewsPanel({ companyId, employees, reviews, questions, setQuestions, canEdit }) {
+  const [from, setFrom] = useState(`${todayStr().slice(0, 4)}-01-01`)
+  const [to, setTo] = useState(todayStr())
+  const [editing, setEditing] = useState(false)
+  const [newLabel, setNewLabel] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  if (!questions.length && !reviews.length) return null
+
+  const active = questions.filter((q) => q.active !== false).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+  const rated = Array.from(new Set(reviews.filter((r) => r.visit_date >= from && r.visit_date <= to).map((r) => r.employee_id)))
+    .map((id) => employees.find((e) => e.id === id)).filter(Boolean)
+    .sort((a, b) => `${a.department || ''} ${a.first_name}`.localeCompare(`${b.department || ''} ${b.first_name}`))
+  const rows = rated.map((e) => ({ e, f: memberFeedback({ reviews, questions, employeeId: e.id, department: e.department, employees, from, to }) }))
+  const allIn = reviews.filter((r) => r.visit_date >= from && r.visit_date <= to)
+  const allAvg = (key) => { const v = allIn.map((r) => Number(r.scores?.[key])).filter((x) => x >= 1 && x <= 5); return v.length ? Math.round((v.reduce((a, b) => a + b, 0) / v.length) * 10) / 10 : '—' }
+  const allOverall = () => { const v = allIn.map((r) => reviewOverall(r.scores)).filter((x) => x != null); return v.length ? Math.round((v.reduce((a, b) => a + b, 0) / v.length) * 10) / 10 : '—' }
+  const comments = allIn.filter((r) => r.comment).sort((a, b) => String(b.visit_date).localeCompare(String(a.visit_date)))
+  const empName = (id) => { const e = employees.find((x) => x.id === id); return e ? `${e.first_name} ${e.last_name}` : '—' }
+
+  async function saveQuestion(q, patch) {
+    setBusy(true); setError('')
+    try {
+      await sb.update('member_review_questions', { id: q.id, company_id: companyId }, patch)
+      setQuestions((qs) => qs.map((x) => (x.id === q.id ? { ...x, ...patch } : x)))
+    } catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
+  async function addQuestion() {
+    const label = newLabel.trim()
+    if (!label) return
+    const key = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40) || `q_${Date.now()}`
+    if (questions.some((q) => q.key === key)) { setError('A question with that name already exists (maybe retired — restore it instead).'); return }
+    setBusy(true); setError('')
+    try {
+      const rows = await sb.insert('member_review_questions', [{ company_id: companyId, key, label, sort_order: (Math.max(0, ...questions.map((q) => q.sort_order || 0)) + 1), active: true }])
+      setQuestions((qs) => [...qs, ...(rows || [])]); setNewLabel('')
+    } catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
+
+  return (
+    <div style={styles.card}>
+      <div style={{ ...styles.row, justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 8 }}>
+        <div style={styles.cardTitle}>Member reviews of staff visits</div>
+        <div style={{ ...styles.row, gap: 8, alignItems: 'center' }}>
+          <input type="date" style={{ ...styles.input, width: 'auto' }} value={from} onChange={(e) => setFrom(e.target.value)} />
+          <span style={{ color: colors.muted }}>to</span>
+          <input type="date" style={{ ...styles.input, width: 'auto' }} value={to} onChange={(e) => setTo(e.target.value)} />
+          {canEdit && <button style={styles.buttonGhost} onClick={() => setEditing((x) => !x)}>{editing ? 'Done' : 'Edit questions'}</button>}
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: colors.muted, margin: '4px 0 8px', lineHeight: 1.5 }}>
+        Members rate each completed visit to their plot in the member portal, 1–5 per question. A personal average appears from {MEMBER_REVIEW_MIN_COUNT} reviews in the period; under that only the count shows. The same figures go into the appraisal pack — the comments below do not.
+      </div>
+      {error && <div style={{ color: colors.danger, fontSize: 12, marginBottom: 6 }}>{error}</div>}
+
+      {editing && (
+        <div style={{ ...styles.card, marginBottom: 10 }}>
+          <div style={styles.cardTitle}>Questions members answer</div>
+          {questions.slice().sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)).map((q) => (
+            <div key={q.id} style={{ ...styles.row, gap: 8, alignItems: 'center', padding: '4px 0', opacity: q.active === false ? 0.55 : 1 }}>
+              <input style={{ ...styles.input, flex: 1 }} defaultValue={q.label} disabled={busy || q.active === false} onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== q.label) saveQuestion(q, { label: v }) }} />
+              <span style={{ fontSize: 11, color: colors.muted, minWidth: 90 }}>{q.active === false ? 'retired' : `key: ${q.key}`}</span>
+              <button style={styles.buttonGhost} disabled={busy} onClick={() => saveQuestion(q, { active: q.active === false })}>{q.active === false ? 'Restore' : 'Retire'}</button>
+            </div>
+          ))}
+          <div style={{ ...styles.row, gap: 8, alignItems: 'center', marginTop: 6 }}>
+            <input style={{ ...styles.input, flex: 1 }} placeholder="New question, e.g. Left the place tidy" value={newLabel} onChange={(e) => setNewLabel(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') addQuestion() }} />
+            <button style={styles.buttonGhost} disabled={busy || !newLabel.trim()} onClick={addQuestion}>Add question</button>
+          </div>
+          <div style={{ fontSize: 11, color: colors.muted, marginTop: 6 }}>Retiring a question keeps its old answers; members simply stop being asked it. Renaming keeps the history under the same key.</div>
+        </div>
+      )}
+
+      {rows.length === 0 ? <div style={{ fontSize: 12, color: colors.muted }}>No reviews in this period.</div> : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={styles.table}>
+            <thead><tr><th style={styles.th}>Employee</th><th style={styles.th}>Department</th><th style={styles.th}>Reviews</th>{active.map((q) => <th key={q.key} style={styles.th}>{q.label}</th>)}<th style={styles.th}>Overall</th></tr></thead>
+            <tbody>
+              {rows.map(({ e, f }) => (
+                <tr key={e.id}>
+                  <td style={styles.td}>{e.first_name} {e.last_name}</td><td style={styles.td}>{e.department || '—'}</td><td style={styles.td}>{f.employee.n}</td>
+                  {active.map((q) => <td key={q.key} style={{ ...styles.td, fontFamily: fonts.mono }}>{f.employee.shown ? (f.employee.avg[q.key] ?? '—') : <span style={{ color: colors.muted }}>·</span>}</td>)}
+                  <td style={{ ...styles.td, fontFamily: fonts.mono, color: colors.goldLt }}>{f.employee.shown ? (f.employee.overall ?? '—') : <span style={{ color: colors.muted, fontFamily: 'inherit' }}>fewer than {MEMBER_REVIEW_MIN_COUNT}</span>}</td>
+                </tr>
+              ))}
+              <tr style={{ fontWeight: 600 }}>
+                <td style={styles.td}>All staff</td><td style={styles.td}></td><td style={styles.td}>{allIn.length}</td>
+                {active.map((q) => <td key={q.key} style={{ ...styles.td, fontFamily: fonts.mono }}>{allAvg(q.key)}</td>)}
+                <td style={{ ...styles.td, fontFamily: fonts.mono, color: colors.goldLt }}>{allOverall()}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {comments.length > 0 && (
+        <>
+          <div style={{ ...styles.cardTitle, marginTop: 12 }}>What members wrote</div>
+          <table style={styles.table}>
+            <thead><tr><th style={styles.th}>Visit</th><th style={styles.th}>Employee</th><th style={styles.th}>Rating</th><th style={styles.th}>Comment</th></tr></thead>
+            <tbody>
+              {comments.map((r) => (
+                <tr key={r.id}><td style={styles.td}>{r.visit_date}</td><td style={styles.td}>{empName(r.employee_id)}</td><td style={{ ...styles.td, fontFamily: fonts.mono }}>{reviewOverall(r.scores) ?? '—'}</td><td style={{ ...styles.td, whiteSpace: 'normal' }}>{r.comment}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </div>
+  )
+}
+
+function GuestFeedbackTab({ companyId, employees, scheduleLocations, feedback, setFeedback, settings, setSettings, memberReviews = [], reviewQuestions = [], setReviewQuestions = () => {}, role }) {
   const [parsed, setParsed] = useState(null)     // { headers, records }
   const [map, setMap] = useState(null)
   const [aliases, setAliases] = useState({})
@@ -6362,6 +6525,7 @@ function GuestFeedbackTab({ companyId, employees, scheduleLocations, feedback, s
 
   return (
     <>
+      <MemberReviewsPanel companyId={companyId} employees={employees} reviews={memberReviews} questions={reviewQuestions} setQuestions={setReviewQuestions} canEdit={role === 'admin' || role === 'hradmin'} />
       <div style={styles.card}>
         <div style={styles.cardTitle}>Import a GuestRevu export</div>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 8, lineHeight: 1.5 }}>

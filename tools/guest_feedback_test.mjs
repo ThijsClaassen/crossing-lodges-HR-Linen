@@ -76,7 +76,11 @@ check('no roster rows at all → whole company (nothing to narrow by)', noSched.
 
 // framing: nothing scores a person
 const src = read('src/guestFeedback.js') + read('src/App.jsx').slice(read('src/App.jsx').indexOf('function GuestFeedbackTab'))
-check('no per-employee score anywhere', !/employee.*score|score.*employee_id/i.test(read('src/guestFeedback.js')))
+// The GUEST feedback half of the module never scores a person. (The member
+// reviews half, added for #519, deliberately does — a member rated a named
+// employee's visit to their own plot — and lives after its own header.)
+const guestHalf = read('src/guestFeedback.js').split('// --- Member reviews of staff visits')[0]
+check('no per-employee score anywhere in guest feedback', !/employee.*score|score.*employee_id/i.test(guestHalf))
 check('the roster is labelled as context, not a finding', /context for the department's score, not a finding about anyone/.test(src))
 check('the appraisal pack says so too', /not a person's score/.test(read('src/App.jsx')) && /not the person/.test(read('src/appraisal.js')))
 
