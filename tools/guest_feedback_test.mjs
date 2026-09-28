@@ -90,6 +90,19 @@ check('guest_feedback keyed by external id per company for re-imports', /guest_f
 check('settings hold column map, category→department, lodge aliases', /column_map\s+jsonb/.test(sql) && /category_departments jsonb/.test(sql) && /location_aliases\s+jsonb/.test(sql))
 check('the investigation result is on record in the migration header', /no outbound API/.test(read('add_guest_feedback.sql')))
 
+// GuestRevu API feed (#527, 2026-09-28): the panel on the tab, and the CSV import demoted to a fallback.
+{
+  const app = read('src/App.jsx')
+  const panel = app.slice(app.indexOf('function GuestRevuSyncPanel('), app.indexOf('function GuestFeedbackTab('))
+  check('panel is mounted above the CSV import, which is now the fallback', /<GuestRevuSyncPanel /.test(app) && /Import a GuestRevu export \(fallback\)/.test(app) && !/GuestRevu has no customer API/.test(app))
+  check('property ids map to lodges and are saved on guest_feedback_settings.guestrevu_accounts', /guestrevu_accounts: next/.test(panel) && /GuestRevu property \{id\} is/.test(panel))
+  check('calls the guestrevu-sync Edge Function with the user token; never sends credentials', /functions\/v1\/guestrevu-sync/.test(panel) && /Authorization: `Bearer \$\{session\?\.access_token\}`/.test(panel) && !/md5/i.test(panel))
+  check('three actions: test (writes nothing), sync now, full history behind a confirm', /call\('test'\)/.test(panel) && /call\('sync'\)/.test(panel) && /window\.confirm\([\s\S]*?call\('sync', \{ mode: 'full' \}\)/.test(panel))
+  check('shows last run from guest_feedback_sync_log and the nightly switch from scheduled_syncs', /guest_feedback_sync_log/.test(panel) && /job: 'guestrevu'/.test(panel) && /Pause nightly/.test(panel))
+  check('test result lists sources, unmapped questions and a mapped preview', /unmapped_questions/.test(panel) && /average_review_rating/.test(panel) && /Nothing was written/.test(panel))
+  check('sb.select supports limit (used for the run log)', /if \(opts\.limit\) params\.limit = opts\.limit/.test(read('src/sb.js')))
+}
+
 console.log(`guest_feedback_test: ${passed} passed, ${failures.length} failed`)
 for (const f of failures) console.log('  FAIL ' + f)
 process.exit(failures.length ? 1 : 0)

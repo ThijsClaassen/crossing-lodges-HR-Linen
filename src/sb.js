@@ -90,6 +90,7 @@ export const sb = {
     const params = { ...filters }
     if (opts.select) params.select = opts.select
     if (opts.order) params.order = opts.order
+    if (opts.limit) params.limit = opts.limit
     const res = await sbFetch(`${REST}/${table}${qs(params)}`, async () => ({
       headers: await headers(),
     }))

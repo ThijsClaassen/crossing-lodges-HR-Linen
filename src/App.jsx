@@ -6357,11 +6357,11 @@ function AppraisalsTab({ companyId, companyName, employees, contracts, qualifica
 }
 
 // ---------------------------------------------------------------------------
-// Guest feedback (#487). GuestRevu has no customer API (checked 2026-09-27),
-// so the feed is its Reviews-tab export: drop the CSV here, confirm which
-// column is which (remembered per company), import. Then: per lodge per
-// week, the department scores, with who was rostered that week alongside —
-// as context. Nothing here scores a person.
+// Guest feedback (#487). The feed is GuestRevu's Partner API since #527
+// (2026-09-28: GuestRevu sent the docs — the 2026-09-27 "no API" finding was
+// wrong); the CSV export import stays as a fallback. Either way: per lodge
+// per week, the department scores, with who was rostered that week
+// alongside — as context. Nothing here scores a person.
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // MEMBER REVIEWS (#519) — LL members rate each staff visit to their plot in
@@ -6482,6 +6482,150 @@ function MemberReviewsPanel({ companyId, employees, reviews, questions, setQuest
   )
 }
 
+// ---------------------------------------------------------------------------
+// GUESTREVU API FEED (#527, 2026-09-28). GuestRevu's Partner API replaces the
+// CSV export as the feed into guest_feedback. The Edge Function
+// guestrevu-sync (Finance repo, supabase/guestrevu-sync.ts) does the pull;
+// this panel holds what a person decides: which GuestRevu property is which
+// lodge, a write-nothing test, a manual run, a one-off full history pull,
+// and the nightly schedule switch. Credentials live in Supabase secrets.
+// ---------------------------------------------------------------------------
+function GuestRevuSyncPanel({ companyId, settings, setSettings, canRun }) {
+  const [accounts, setAccounts] = useState({})   // account_id → lodge code
+  const [newId, setNewId] = useState('')
+  const [busy, setBusy] = useState('')
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState('')
+  const [log, setLog] = useState([])
+  const [schedule, setSchedule] = useState(null)   // scheduled_syncs row or null
+
+  useEffect(() => { setAccounts(settings?.guestrevu_accounts || {}) }, [settings?.company_id, settings?.guestrevu_accounts])
+  const loadStatus = async () => {
+    const rows = await sb.select('guest_feedback_sync_log', { company_id: companyId }, { order: 'started_at.desc', limit: 5 }).catch(() => [])
+    setLog(rows || [])
+    const sched = await sb.select('scheduled_syncs', { company_id: companyId, job: 'guestrevu' }, {}).catch(() => [])
+    setSchedule(sched?.[0] || null)
+  }
+  useEffect(() => { loadStatus() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [companyId])
+
+  async function saveAccounts(next) {
+    setAccounts(next)
+    await sb.upsert('guest_feedback_settings', { company_id: companyId, column_map: settings?.column_map || {}, category_departments: settings?.category_departments || {}, location_aliases: settings?.location_aliases || {}, guestrevu_accounts: next, updated_at: new Date().toISOString() }, 'company_id')
+    setSettings({ ...(settings || { company_id: companyId, column_map: {}, category_departments: {}, location_aliases: {} }), guestrevu_accounts: next })
+  }
+  async function call(action, extra = {}) {
+    setBusy(action); setError(''); setResult(null)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/guestrevu-sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token}` },
+        body: JSON.stringify({ companyId, action, ...extra }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(body.error || `guestrevu-sync failed (${res.status})`)
+      setResult({ action, ...body })
+      await loadStatus()
+    } catch (e) { setError(e.message) } finally { setBusy('') }
+  }
+  async function toggleSchedule() {
+    setError('')
+    try {
+      if (schedule) await sb.update('scheduled_syncs', { id: schedule.id, company_id: companyId }, { enabled: !schedule.enabled })
+      else await sb.insert('scheduled_syncs', [{ company_id: companyId, job: 'guestrevu', enabled: true, note: 'Enabled from the HR Guest Feedback tab' }])
+      await loadStatus()
+    } catch (e) { setError(e.message) }
+  }
+
+  const last = log[0]
+  const ids = Object.keys(accounts)
+  const fmt = (ts) => (ts ? new Date(ts).toLocaleString('en-ZA', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—')
+
+  return (
+    <div style={styles.card}>
+      <div style={{ ...styles.row, justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 8 }}>
+        <div style={styles.cardTitle}>GuestRevu feed (API)</div>
+        <div style={{ fontSize: 12, color: colors.muted }}>
+          {last ? <>Last run {fmt(last.started_at)} · {last.triggered_by} · {last.reviews_written} written{last.error ? <span style={{ color: colors.danger }}> · failed: {last.error}</span> : last.completed ? ' · up to date' : ' · more to fetch'}</> : 'Never run'}
+          {' · '}nightly {schedule?.enabled ? <strong style={{ color: colors.ok }}>on</strong> : <strong>off</strong>}
+          {canRun && <button style={{ ...styles.buttonGhost, marginLeft: 8 }} onClick={toggleSchedule}>{schedule?.enabled ? 'Pause nightly' : 'Enable nightly'}</button>}
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: colors.muted, margin: '4px 0 10px', lineHeight: 1.5 }}>
+        Reviews come straight from GuestRevu into the table below — same categories, same department mapping, same appraisal pack. Each GuestRevu property has an <em>account id</em> (the property ID in GuestRevu); tell me which lodge it is. Credentials are Supabase secrets, not typed here.
+      </div>
+
+      <div style={styles.formGrid}>
+        {ids.map((id) => (
+          <div key={id} style={{ ...styles.row, gap: 8, alignItems: 'end' }}>
+            <div style={{ flex: 1 }}>
+              <label style={styles.label}>GuestRevu property {id} is</label>
+              <select style={styles.input} value={accounts[id] || ''} disabled={!canRun} onChange={(e) => saveAccounts({ ...accounts, [id]: e.target.value })}>
+                <option value="">— unassigned (imports with no lodge) —</option>
+                {LOCATIONS.map((l) => <option key={l.id} value={l.id}>{l.name} ({l.id})</option>)}
+              </select>
+            </div>
+            {canRun && <button style={styles.buttonGhost} onClick={() => { const n = { ...accounts }; delete n[id]; saveAccounts(n) }}>Remove</button>}
+          </div>
+        ))}
+        {canRun && (
+          <div>
+            <label style={styles.label}>Add a GuestRevu property id</label>
+            <div style={{ ...styles.row, gap: 8 }}>
+              <input style={styles.input} inputMode="numeric" placeholder="e.g. 1001" value={newId} onChange={(e) => setNewId(e.target.value.replace(/\D/g, ''))} onKeyDown={(e) => { if (e.key === 'Enter' && newId) { saveAccounts({ ...accounts, [newId]: '' }); setNewId('') } }} />
+              <button style={styles.buttonGhost} disabled={!newId} onClick={() => { saveAccounts({ ...accounts, [newId]: '' }); setNewId('') }}>Add</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {canRun && (
+        <div style={{ ...styles.row, gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+          <button style={styles.buttonGhost} disabled={!!busy || ids.length === 0} onClick={() => call('test')}>{busy === 'test' ? 'Testing…' : 'Test connection (writes nothing)'}</button>
+          <button style={styles.button} disabled={!!busy || ids.length === 0} onClick={() => call('sync')}>{busy === 'sync' ? 'Syncing…' : 'Sync now'}</button>
+          <button style={styles.buttonGhost} disabled={!!busy || ids.length === 0} onClick={() => { if (window.confirm('Pull the complete review history from GuestRevu? Existing rows are updated, not duplicated. This can take a few runs for a big account.')) call('sync', { mode: 'full' }) }}>{busy === 'full' ? 'Pulling…' : 'Pull full history'}</button>
+        </div>
+      )}
+      {error && <div style={{ color: colors.danger, fontSize: 12, marginTop: 8 }}>{error}</div>}
+
+      {result && result.action === 'test' && (
+        <div style={{ marginTop: 12 }}>
+          <div style={styles.cardTitle}>Test result <span style={{ fontWeight: 400, color: colors.muted }}>· {result.base_url} · function {result.revision}</span></div>
+          {Object.entries(result.accounts || {}).map(([id, a]) => (
+            <div key={id} style={{ fontSize: 12, marginBottom: 10, paddingBottom: 8, borderBottom: `1px solid ${colors.border}` }}>
+              <strong>Property {id}</strong> → {a.lodge || <em>no lodge</em>}
+              {a.error ? <div style={{ color: colors.danger }}>{a.error}</div> : (
+                <>
+                  <div>{a.number_reviews} reviews in total · sources: {(a.sources || []).map((s) => `${s.source_name} ${s.number_reviews} (avg ${s.average_review_rating}%)`).join(', ') || '—'}</div>
+                  {a.unmapped_questions?.length > 0 && <div style={{ color: colors.gold }}>Questions with no category yet (kept under their own name): {a.unmapped_questions.join(' · ')}</div>}
+                  {(a.preview || []).slice(0, 3).map((p, i) => (
+                    <div key={i} style={{ color: colors.muted }}>{p.stay_date} · overall {p.overall ?? '—'} · {Object.entries(p.scores || {}).map(([k, v]) => `${k} ${v}`).join(', ')}{p.comment ? ` · "${p.comment.slice(0, 80)}"` : ''}</div>
+                  ))}
+                </>
+              )}
+            </div>
+          ))}
+          <div style={{ fontSize: 11, color: colors.muted }}>Nothing was written. If the lodges and categories look right, press Sync now (or Pull full history once).</div>
+        </div>
+      )}
+      {result && result.action === 'sync' && (
+        <div style={{ marginTop: 12, fontSize: 12 }}>
+          <strong>{result.reviews_written}</strong> reviews written from {result.reviews_read} read in {result.batches} batch{result.batches === 1 ? '' : 'es'}{result.completed ? ' — up to date.' : ' — more remain; run again or let the nightly job continue.'}
+          {result.error && <div style={{ color: colors.danger }}>{result.error}</div>}
+          {Object.entries(result.detail || {}).map(([id, d]) => d.unmapped_questions?.length > 0 && <div key={id} style={{ color: colors.gold }}>Property {id}: unmapped questions {d.unmapped_questions.join(' · ')}</div>)}
+          <div style={{ color: colors.muted }}>Reload the page to see the new weeks in the trend below.</div>
+        </div>
+      )}
+      {log.length > 1 && (
+        <details style={{ marginTop: 10, fontSize: 12 }}>
+          <summary style={{ cursor: 'pointer', color: colors.muted }}>Previous runs</summary>
+          {log.slice(1).map((r) => <div key={r.id} style={{ color: colors.muted }}>{fmt(r.started_at)} · {r.triggered_by} · {r.mode} · {r.reviews_written} written{r.error ? ` · ${r.error}` : r.completed ? '' : ' · incomplete'}</div>)}
+        </details>
+      )}
+    </div>
+  )
+}
+
 function GuestFeedbackTab({ companyId, employees, scheduleLocations, feedback, setFeedback, settings, setSettings, memberReviews = [], reviewQuestions = [], setReviewQuestions = () => {}, role }) {
   const [parsed, setParsed] = useState(null)     // { headers, records }
   const [map, setMap] = useState(null)
@@ -6551,10 +6695,11 @@ function GuestFeedbackTab({ companyId, employees, scheduleLocations, feedback, s
   return (
     <>
       <MemberReviewsPanel companyId={companyId} employees={employees} reviews={memberReviews} questions={reviewQuestions} setQuestions={setReviewQuestions} canEdit={role === 'admin' || role === 'hradmin'} />
+      <GuestRevuSyncPanel companyId={companyId} settings={settings} setSettings={setSettings} canRun={role === 'admin' || role === 'hradmin'} />
       <div style={styles.card}>
-        <div style={styles.cardTitle}>Import a GuestRevu export</div>
+        <div style={styles.cardTitle}>Import a GuestRevu export (fallback)</div>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 8, lineHeight: 1.5 }}>
-          GuestRevu has no customer API, so: in GuestRevu go to <strong>Reviews</strong>, set the date range, click <strong>Export</strong> and pick <strong>.csv</strong>. Drop that file here. The column choices are remembered, so the next export is one click.
+          If the API feed above is not running: in GuestRevu go to <strong>Reviews</strong>, set the date range, click <strong>Export</strong> and pick <strong>.csv</strong>. Drop that file here. The column choices are remembered, so the next export is one click. Rows already brought in by the API are matched on their id and not duplicated.
         </div>
         <input type="file" accept=".csv,text/csv" onChange={onFile} style={styles.input} />
         {parsed && map && (
