@@ -10,11 +10,10 @@
 // rule as the Finance Dashboard itself (crossing-lodges-budget/src/
 // constants.js REAL_REVENUE_STATUSES) so a night here agrees with what the
 // Finance Dashboard would call occupied.
-const REAL_BOOKING_STATUSES = ['Confirmed', 'Checked Out']
 
-function isoDate(d) {
-  return d.toISOString().slice(0, 10)
-}
+import { isoDate } from './dates.js'
+
+const REAL_BOOKING_STATUSES = ['Confirmed', 'Checked Out']
 
 // revenue_bookings.bed_nights is the *total* for the whole stay (guests x
 // nights), not a per-night figure — a booking only tells you "9 bed nights

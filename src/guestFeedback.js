@@ -8,6 +8,19 @@
 
 // --- CSV -------------------------------------------------------------------------
 // RFC 4180-ish: quoted fields, doubled quotes, CRLF or LF, BOM tolerated.
+// Calendar date helpers, inlined (not imported from ./dates.js) because the
+// tests load this file on its own. Same code as src/dates.js.
+function isoDate(d) {
+  const x = d instanceof Date ? d : new Date(d)
+  if (Number.isNaN(x.getTime())) return null
+  return `${String(x.getFullYear()).padStart(4, '0')}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`
+}
+function utcIsoDate(d) {
+  const x = d instanceof Date ? d : new Date(d)
+  if (Number.isNaN(x.getTime())) return null
+  return `${String(x.getUTCFullYear()).padStart(4, '0')}-${String(x.getUTCMonth() + 1).padStart(2, '0')}-${String(x.getUTCDate()).padStart(2, '0')}`
+}
+
 export function parseCsv(text) {
   const rows = []
   let row = []
@@ -86,7 +99,7 @@ export function toIsoDate(v) {
   m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/)
   if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
   const d = new Date(s)
-  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10)
+  return Number.isNaN(d.getTime()) ? null : isoDate(d)
 }
 
 const num = (v) => {
@@ -137,7 +150,7 @@ export function mondayOf(iso) {
   const d = new Date(`${iso}T00:00:00Z`)
   const day = d.getUTCDay() || 7
   d.setUTCDate(d.getUTCDate() - (day - 1))
-  return d.toISOString().slice(0, 10)
+  return utcIsoDate(d)
 }
 
 // Per lodge, per week (Monday key), per category: average and count. Plus

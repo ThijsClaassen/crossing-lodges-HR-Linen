@@ -29,6 +29,7 @@ import {
 } from './qualifications.js'
 import { buildAppraisalPack, appraisalHtml } from './appraisal.js'
 import { parseCsv, guessColumnMap, normaliseRows, weeklyTrend, rosterForWeek, departmentTrend, CATEGORY_GUESS, memberFeedback, reviewOverall, MEMBER_REVIEW_MIN_COUNT } from './guestFeedback.js'
+import { isoDate, todayIso } from './dates.js'
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -52,7 +53,7 @@ function fmt(n, decimals = 2) {
 }
 
 function todayStr() {
-  return new Date().toISOString().slice(0, 10)
+  return todayIso()
 }
 
 function daysUntil(dateStr) {
@@ -2652,7 +2653,7 @@ function LeaveTab({ companyId, employees, shiftPatterns, rosteredOffDays, leave,
       employee: emp,
       entitlements: scoped,
       leaveRows: leave,
-      asOf: new Date().toISOString().slice(0, 10),
+      asOf: todayIso(),
       // Adapted rather than passed raw: leaveEngine hands this the EMPLOYEE
       // now, not just an anchor date, because which pattern applies is a
       // property of the person.
@@ -3745,6 +3746,11 @@ function UniformsTab({
 function LinenTab({ role, companyId, items, stock, movements, suppliers, onItemAdd, onItemUpdate, onItemRemove, onStockChange, onMovementAdd }) {
   const isAdmin = role === 'admin' || role === 'hradmin'
   const [location, setLocation] = useState(() => urlParam('loc') || 'ZC')
+  // Read from the context here: the dependency below named companyLoading,
+  // which only existed in App's scope, so opening Linen threw a
+  // ReferenceError and blanked the page (caught 2026-09-29 by
+  // tools/unbound_identifiers_test.mjs).
+  const { loading: companyLoading } = useCompany()
   // 'ZC' is only a first guess: this state initialises before the lodge list
   // has loaded (CompanyContext fetches it), and another company won't have a
   // lodge called ZC at all. Once LOCATIONS is populated — and again whenever
@@ -5278,7 +5284,7 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonu
   const defaultStart = (() => {
     const d = new Date(`${today}T00:00:00`)
     d.setDate(d.getDate() - 28)
-    return d.toISOString().slice(0, 10)
+    return isoDate(d)
   })()
   const [startDate, setStartDate] = useState(defaultStart)
   const [endDate, setEndDate] = useState(today)

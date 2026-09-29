@@ -17,6 +17,8 @@
 // Kept free of React and of Supabase so it can be exercised directly —
 // see tools/leave_engine_test.mjs.
 
+import { utcIsoDate } from './dates.js'
+
 export const LEAVE_TYPES = ['annual', 'sick', 'family_responsibility', 'maternity']
 
 export const LEAVE_TYPE_LABELS = {
@@ -46,7 +48,7 @@ function toDate(value) {
 }
 
 function toISO(date) {
-  return date.toISOString().slice(0, 10)
+  return utcIsoDate(date)
 }
 
 // Add months, clamping the day so 31 Jan + 1 month is 28/29 Feb rather than

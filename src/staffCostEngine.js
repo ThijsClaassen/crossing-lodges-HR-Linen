@@ -36,6 +36,7 @@
 // for their food/bev share rather than a fabricated number.
 
 import { sb, LOCATIONS } from './sb.js'
+import { isoDate } from './dates.js'
 
 // Was a hardcoded ['ZC','EC','SC'] (2026-08-27). Lodges became dynamic in the
 // multi-tenant work, so a company whose lodge ids differ would have had every
@@ -54,13 +55,13 @@ function mondayOf(dateStr) {
   const day = d.getDay() // 0 = Sunday .. 6 = Saturday
   const diff = day === 0 ? -6 : 1 - day
   d.setDate(d.getDate() + diff)
-  return d.toISOString().slice(0, 10)
+  return isoDate(d)
 }
 
 function addDays(dateStr, n) {
   const d = new Date(`${dateStr}T00:00:00`)
   d.setDate(d.getDate() + n)
-  return d.toISOString().slice(0, 10)
+  return isoDate(d)
 }
 
 // Every Monday from startDate's week through endDate's week, inclusive.
@@ -178,7 +179,7 @@ const WORKING_DAYS_PER_MONTH = 21.67
 function monthsAgoIso(months) {
   const d = new Date()
   d.setMonth(d.getMonth() - months)
-  return d.toISOString().slice(0, 10)
+  return isoDate(d)
 }
 
 // Actual uniform spend per employee over the last 12 months, from real issues

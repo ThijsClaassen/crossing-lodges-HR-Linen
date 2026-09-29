@@ -3,6 +3,14 @@
 // Pure helpers on top, storage/REST helpers below. The pure part is what
 // tools/qualifications_test.mjs executes, so keep it free of imports.
 
+// Calendar date helpers, inlined (not imported from ./dates.js) because the
+// tests load this file on its own. Same code as src/dates.js.
+function isoDate(d) {
+  const x = d instanceof Date ? d : new Date(d)
+  if (Number.isNaN(x.getTime())) return null
+  return `${String(x.getFullYear()).padStart(4, '0')}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`
+}
+
 export const QUALIFICATION_KINDS = [
   { id: 'drivers_licence', label: "Driver's licence", hasClass: true },
   { id: 'pdp', label: 'PDP (professional driving permit)' },
@@ -30,7 +38,7 @@ export function classCovers(held, required) {
 // Days from `today` to the expiry: negative = expired, null = never expires.
 export function daysToExpiry(q, today = new Date()) {
   if (!q?.expires_on) return null
-  const t = new Date(today.toISOString().slice(0, 10))
+  const t = new Date(isoDate(today))
   const e = new Date(q.expires_on)
   return Math.round((e - t) / 86400000)
 }
