@@ -87,11 +87,17 @@ async function sbFetch(url, buildInit) {
 export const sb = {
   // select('hr_employees', { location_id: 'ZC' }, { select: '*', order: 'first_name.asc' })
   async select(table, filters = {}, opts = {}) {
-    const params = { ...filters }
-    if (opts.select) params.select = opts.select
-    if (opts.order) params.order = opts.order
-    if (opts.limit) params.limit = opts.limit
-    const res = await sbFetch(`${REST}/${table}${qs(params)}`, async () => ({
+    // select / order / limit are PostgREST options, not filters: they go in
+    // as written. (Through qs() a column list like "id,company_id" has no dot
+    // and came out as "select=eq.id,company_id" — the PGRST100 error of
+    // 2026-10-04.)
+    const raw = []
+    if (opts.select) raw.push(`select=${opts.select}`)
+    if (opts.order) raw.push(`order=${opts.order}`)
+    if (opts.limit) raw.push(`limit=${opts.limit}`)
+    const base = qs(filters)
+    const query = raw.length ? `${base ? base + '&' : '?'}${raw.join('&')}` : base
+    const res = await sbFetch(`${REST}/${table}${query}`, async () => ({
       headers: await headers(),
     }))
     return handle(res)

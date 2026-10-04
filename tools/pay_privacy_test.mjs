@@ -151,6 +151,30 @@ try {
   check('Contracts screen renders', false, String(e.stack || e).split('\n').slice(0, 3).join(' | '))
 }
 
+// sb.select builds the URL the way PostgREST reads it (2026-10-04: a column
+// list went out as "select=eq.id,company_id,…" → PGRST100 on opening HR).
+// Runs the real qs() and select() from sb.js with fetch stubbed.
+{
+  const src = read('src/sb.js')
+  const qsSrc = src.slice(src.indexOf('function qs('), src.indexOf('async function handle('))
+  const selStart = src.indexOf('async select(')
+  const selSrc = src.slice(selStart, src.indexOf('\n  },', selStart) + 4)
+  const urls = []
+  const make = new Function('REST', 'sbFetch', 'headers', 'handle',
+    `${qsSrc}\nreturn { ${selSrc} }`)
+  const s = make('R', async (url) => { urls.push(url); return [] }, async () => ({}), (x) => x)
+  await s.select('hr_contracts', { company_id: 'c1' }, { select: 'id,company_id,notes' })
+  await s.select('hr_bonuses', { company_id: 'c1' }, { select: 'id,amount', order: 'bonus_date.desc' })
+  await s.select('guest_feedback_sync_log', { company_id: 'c1' }, { order: 'started_at.desc', limit: 5 })
+  await s.select('hr_employees', {}, { select: 'id' })
+  await s.select('hr_employees', { location_id: 'ZC' })
+  check('column list goes out as select=id,… (no eq.)', urls[0] === 'R/hr_contracts?company_id=eq.c1&select=id,company_id,notes', urls[0])
+  check('select and order together', urls[1] === 'R/hr_bonuses?company_id=eq.c1&select=id,amount&order=bonus_date.desc', urls[1])
+  check('limit goes out as a number, not eq.5', urls[2] === 'R/guest_feedback_sync_log?company_id=eq.c1&order=started_at.desc&limit=5', urls[2])
+  check('options with no filters start the query string', urls[3] === 'R/hr_employees?select=id', urls[3])
+  check('filters alone unchanged', urls[4] === 'R/hr_employees?location_id=eq.ZC', urls[4])
+}
+
 console.log(`pay_privacy_test: ${passed} passed, ${failures.length} failed`)
 for (const f of failures) console.log('  FAIL ' + f)
 process.exit(failures.length ? 1 : 0)

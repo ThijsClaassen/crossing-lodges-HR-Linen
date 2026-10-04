@@ -100,7 +100,7 @@ check('the investigation result is on record in the migration header', /no outbo
   check('three actions: test (writes nothing), sync now, full history behind a confirm', /call\('test'\)/.test(panel) && /call\('sync'\)/.test(panel) && /window\.confirm\([\s\S]*?call\('sync', \{ mode: 'full' \}\)/.test(panel))
   check('shows last run from guest_feedback_sync_log and the nightly switch from scheduled_syncs', /guest_feedback_sync_log/.test(panel) && /job: 'guestrevu'/.test(panel) && /Pause nightly/.test(panel))
   check('test result lists sources, unmapped questions and a mapped preview', /unmapped_questions/.test(panel) && /average_review_rating/.test(panel) && /Nothing was written/.test(panel))
-  check('sb.select supports limit (used for the run log)', /if \(opts\.limit\) params\.limit = opts\.limit/.test(read('src/sb.js')))
+  check('sb.select supports limit (used for the run log)', /if \(opts\.limit\) raw\.push\(`limit=\$\{opts\.limit\}`\)/.test(read('src/sb.js')))
 }
 
 console.log(`guest_feedback_test: ${passed} passed, ${failures.length} failed`)
