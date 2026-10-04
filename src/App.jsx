@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useState, useLayoutEffect, useRef } from 'react'
+import { useBackToHome } from './backButton.js'
 import { sb, LOCATIONS, UNIFORM_CATEGORIES, LINEN_CATEGORIES, MOVEMENT_REASONS, CONTRACT_TYPES } from './sb.js'
 import { getRealStaffCostOverview } from './staffCostEngine.js'
 import { hrRoleFor, contractPayPatch, CONTRACT_PAY_FIELDS } from './payPrivacy.js'
@@ -911,6 +912,10 @@ function AuthenticatedApp() {
   // Company-access guards — placed here, after every hook above, rather
   // than before them: React requires the same hooks to run on every render
   // in the same order, so an early return can't come before a useState.
+  // Android back button → this role's first page (#555).
+  const backTabs = tabsForRole(role)
+  useBackToHome({ page: backTabs.some((t) => t.id === tab) ? tab : backTabs[0]?.id, setPage: setTab, home: backTabs[0]?.id })
+
   if (companyLoading) {
     return (
       <AuthMessageScreen>
