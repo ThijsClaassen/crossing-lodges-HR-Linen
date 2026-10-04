@@ -97,10 +97,13 @@ export const sb = {
     return handle(res)
   },
 
-  async insert(table, rows) {
+  // opts.minimal (2026-10-04, pay privacy): ask for nothing back. Needed on
+  // hr_contracts and hr_bonuses, whose pay columns can be written but not
+  // read — handing the new row back would include them and be refused.
+  async insert(table, rows, opts = {}) {
     const res = await sbFetch(`${REST}/${table}`, async () => ({
       method: 'POST',
-      headers: await headers({ Prefer: 'return=representation' }),
+      headers: await headers({ Prefer: opts.minimal ? 'return=minimal' : 'return=representation' }),
       body: JSON.stringify(Array.isArray(rows) ? rows : [rows]),
     }))
     return handle(res)
@@ -118,19 +121,19 @@ export const sb = {
     return handle(res)
   },
 
-  async update(table, filters, patch) {
+  async update(table, filters, patch, opts = {}) {
     const res = await sbFetch(`${REST}/${table}${qs(filters)}`, async () => ({
       method: 'PATCH',
-      headers: await headers({ Prefer: 'return=representation' }),
+      headers: await headers({ Prefer: opts.minimal ? 'return=minimal' : 'return=representation' }),
       body: JSON.stringify(patch),
     }))
     return handle(res)
   },
 
-  async remove(table, filters) {
+  async remove(table, filters, opts = {}) {
     const res = await sbFetch(`${REST}/${table}${qs(filters)}`, async () => ({
       method: 'DELETE',
-      headers: await headers({ Prefer: 'return=representation' }),
+      headers: await headers({ Prefer: opts.minimal ? 'return=minimal' : 'return=representation' }),
     }))
     return handle(res)
   },

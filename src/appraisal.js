@@ -114,7 +114,9 @@ export function buildAppraisalPack({
     leave,
     pattern: patternText || '—',
     extraOffDays: extras.map((d) => ({ date: String(d.off_date).slice(0, 10), note: d.note || '' })),
-    bonuses: bonus.map((b) => ({ date: String(b.bonus_date).slice(0, 10), amount: Number(b.amount || 0), type: b.bonus_type || '', note: b.note || '' })),
+    // amount is null when the reader may not see pay (roles step 4,
+    // 2026-10-04): the bonus is listed, its amount is not.
+    bonuses: bonus.map((b) => ({ date: String(b.bonus_date).slice(0, 10), amount: b.amount === undefined || b.amount === null ? null : Number(b.amount), type: b.bonus_type || '', note: b.note || '' })),
     // Guest feedback (#487): the department's trend, never a personal score.
     feedbackTrend: feedbackTrend && feedbackTrend.categories?.length ? feedbackTrend : null,
     // Member reviews (#519): the person's own averages, floored, next to the
@@ -169,7 +171,7 @@ ${leaveDetail ? `<table style="margin-top:8px"><tr><th style="width:auto">Dates<
 <table>${row('Pattern', pack.pattern)}${row('Extra off days given', pack.extraOffDays.length ? pack.extraOffDays.map((d) => `${d.date}${d.note ? ` (${d.note})` : ''}`).join(', ') : 'none')}</table>
 
 <h2>Bonuses in the period</h2>
-${pack.bonuses.length ? `<table>${pack.bonuses.map((b) => row(`${b.date}${b.type ? ` — ${b.type}` : ''}`, `${zar(b.amount)}${b.note ? ` — ${b.note}` : ''}`)).join('')}</table>` : '<p><em>None.</em></p>'}
+${pack.bonuses.length ? `<table>${pack.bonuses.map((b) => row(`${b.date}${b.type ? ` — ${b.type}` : ''}`, `${b.amount === null ? 'amount not shown' : zar(b.amount)}${b.note ? ` — ${b.note}` : ''}`)).join('')}</table>` : '<p><em>None.</em></p>'}
 
 ${pack.feedbackTrend ? `<h2>Guest feedback — department trend (${esc(pack.feedbackTrend.categories.join(', '))})</h2>
 <p style="color:#555;margin:0 0 6px">Average guest score for the department at the lodges where this person was rostered. It describes the department's weeks, not the person.</p>

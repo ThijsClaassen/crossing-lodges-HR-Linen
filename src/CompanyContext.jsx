@@ -14,6 +14,7 @@
 // 'staff' | 'admin' | 'hradmin' role string from base role + isHrAdmin, so
 // none of the app's extensive role === 'hradmin' checks needed to change.
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
+import { canSeePayFor, isHrAdminFor } from './payPrivacy.js'
 import { applyTheme } from './branding.js'
 import { supabase } from './supabaseClient.js'
 import { setLocations } from './sb.js'
@@ -74,6 +75,19 @@ export function CompanyProvider({ children }) {
       if (appAccessErr) throw appAccessErr
 
       const isPlatformAdmin = !!adminRow
+
+      // Roles (2026-10-04, #544 step 4): the person's profile (owner, hr,
+      // gm …) arrives with add_user_roles.sql. Read on its own and ignored on
+      // error, like branding below, so the app still loads where that column
+      // does not exist yet — then nobody is treated as owner, and HR access
+      // stays exactly as it was (the hr_admins row).
+      let profileByCompany = {}
+      const { data: profRows, error: profErr } = await supabase
+        .from('user_companies')
+        .select('company_id, profile')
+        .eq('user_id', user.id)
+      if (!profErr) for (const r of profRows || []) profileByCompany[r.company_id] = r.profile
+
       const roleByCompany = Object.fromEntries((memberships || []).map((m) => [m.company_id, m.role]))
       const hrAdminCompanyIds = new Set((hrAdminRows || []).map((r) => r.company_id))
 
@@ -122,7 +136,12 @@ export function CompanyProvider({ children }) {
             tradingName: themeByCompany[c.id]?.tradingName ?? null,
           themeMode: themeByCompany[c.id]?.mode ?? 'light',
           role: roleByCompany[c.id] || (isPlatformAdmin ? 'admin' : null),
-          isHrAdmin: isPlatformAdmin || hrAdminCompanyIds.has(c.id),
+          profile: isPlatformAdmin ? 'owner' : profileByCompany[c.id] || null,
+          // Owners count as HR admins (is_hr_admin() in add_hr_pay_privacy.sql
+          // says the same on the server).
+          isHrAdmin: isHrAdminFor({ profile: profileByCompany[c.id], isPlatformAdmin, hasHrAdminRow: hrAdminCompanyIds.has(c.id) }),
+          // Pay per person: Owners only (Thijs, 2026-09-30).
+          canSeePay: canSeePayFor({ profile: profileByCompany[c.id], isPlatformAdmin }),
         }))
         .filter((c) => c.role)
         .filter((c) => {
@@ -221,6 +240,8 @@ export function CompanyProvider({ children }) {
     companySlug: current?.slug || '',
     role: current?.role || null,
     isHrAdmin: current?.isHrAdmin || false,
+    profile: current?.profile || null,
+    canSeePay: current?.canSeePay || false,
     switchCompany,
     reload: load,
   }

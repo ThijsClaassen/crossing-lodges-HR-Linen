@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useMemo, useState, useLayoutEffect, useRef } from 'react'
 import { sb, LOCATIONS, UNIFORM_CATEGORIES, LINEN_CATEGORIES, MOVEMENT_REASONS, CONTRACT_TYPES } from './sb.js'
 import { getRealStaffCostOverview } from './staffCostEngine.js'
+import { hrRoleFor, contractPayPatch, CONTRACT_PAY_FIELDS } from './payPrivacy.js'
+import { loadContractsAndBonuses, insertContract, updateContract, insertBonus, removeBonus } from './hrPayData.js'
 import { allBalances, entitlementForEmployee, LEAVE_TYPE_LABELS } from './leaveEngine.js'
 import { guestsByLodgeAndDate, requiredCountFor } from './staffingCoverageEngine.js'
 import {
@@ -548,6 +550,7 @@ function AuthenticatedApp() {
     companyName,
     role: baseRole,
     isHrAdmin,
+    canSeePay,
     switchCompany,
     company,
 } = useCompany()
@@ -567,7 +570,12 @@ function AuthenticatedApp() {
   // or role === 'hradmin' — deriving the same three-value string here means
   // none of that logic below needed to change, only where the value comes
   // from.
-  const role = baseRole === 'admin' && isHrAdmin ? 'hradmin' : baseRole
+  //
+  // Roles step 4 (2026-10-04): HR access no longer also needs the admin
+  // tier. The HR manager is staff tier with an hr_admins row and must get the
+  // HR tabs; Owners count as HR admins. Pay figures are a separate question
+  // (canSeePay, Owners only), handled screen by screen.
+  const role = hrRoleFor({ baseRole, isHrAdmin })
 
   async function logout() {
     await supabase.auth.signOut()
@@ -646,15 +654,16 @@ function AuthenticatedApp() {
       // Contracts (and now Loans, same reasoning) hold sensitive pay-related
       // data — only ever fetched for the HR Admin role, so it never transits
       // to a Staff/Admin session.
+      //
+      // Pay privacy (2026-10-04): contracts and bonuses come through
+      // loadContractsAndBonuses — named columns only, pay laid over for the
+      // Owner from get_hr_pay(). See hrPayData.js.
       const results = await Promise.all(
         role === 'hradmin'
           ? [
               ...base,
-              sb.select('hr_contracts', { company_id: companyId }, {}),
+              loadContractsAndBonuses({ companyId, canSeePay }),
               sb.select('hr_staff_loans', { company_id: companyId }, { order: 'loan_date.desc' }),
-              // .catch so a company that hasn't run add_hr_bonuses.sql yet
-              // still loads the rest of the app.
-              sb.select('hr_bonuses', { company_id: companyId }, { order: 'bonus_date.desc' }).catch(() => []),
             ]
           : base
       )
@@ -671,10 +680,11 @@ function AuthenticatedApp() {
         leaveRes,
         settingsRes,
         ratiosRes,
-        conRes,
+        payDataRes,
         loanRes,
-        bonusRes,
       ] = results
+      const conRes = payDataRes?.contracts
+      const bonusRes = payDataRes?.bonuses
 
       setEmployees(empRes || [])
       setSuppliers(supRes || [])
@@ -1166,10 +1176,11 @@ function AuthenticatedApp() {
                 contracts={contracts}
                 onAdd={addLocalContract}
                 onUpdate={updateLocalContract}
+                canSeePay={canSeePay}
               />
             )}
             {activeTab === 'staffcost' && role === 'hradmin' && (
-              <StaffCostTab companyId={companyId} employees={employees} contracts={contracts} scheduleLocations={scheduleLocations} bonuses={bonuses} setBonuses={setBonuses} />
+              <StaffCostTab companyId={companyId} employees={employees} contracts={contracts} scheduleLocations={scheduleLocations} bonuses={bonuses} setBonuses={setBonuses} canSeePay={canSeePay} />
             )}
             {activeTab === 'feedback' && (role === 'admin' || role === 'hradmin') && (
               <GuestFeedbackTab
@@ -4512,21 +4523,20 @@ function contractToForm(contract) {
     notes: contract.notes || '',
   }
 }
-function contractPatch(form) {
-  const num = (v) => (v === '' ? null : Number(v))
+// Pay fields go through contractPayPatch (payPrivacy.js): the Owner's blank
+// clears a figure; the HR manager's blank leaves it alone, because they
+// cannot see what is stored (roles step 4, 2026-10-04).
+function contractPatch(form, { canSeePay }) {
   return {
     contract_type: form.contract_type,
     start_date: form.start_date,
     end_date: form.end_date || null,
-    salary: num(form.salary),
     medical_aid: form.medical_aid,
     medical_aid_scheme: form.medical_aid_scheme || null,
-    medical_aid_monthly_cost: num(form.medical_aid_monthly_cost),
     pension_fund: form.pension_fund,
     pension_fund_name: form.pension_fund_name || null,
-    pension_fund_monthly_cost: num(form.pension_fund_monthly_cost),
-    housing_monthly_cost: num(form.housing_monthly_cost),
     notes: form.notes,
+    ...contractPayPatch(form, { canSeePay }),
   }
 }
 function fixedRealCostOf(c) {
@@ -4542,7 +4552,7 @@ function contractStatus(contract) {
   return { tone: 'good', text: `Until ${contract.end_date}`, days }
 }
 
-function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
+function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate, canSeePay = false }) {
   const [search, setSearch] = useState('')
   const [deptFilter, setDeptFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
@@ -4596,7 +4606,7 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
           {employees.length} employee{employees.length === 1 ? '' : 's'}
           {ending ? ` · ${ending} contract${ending === 1 ? '' : 's'} ending within 60 days` : ''}
           {ended ? ` · ${ended} ended` : ''}
-          {` · fixed real cost R ${fmt(totalFixed)} / month`}
+          {canSeePay ? ` · fixed real cost R ${fmt(totalFixed)} / month` : ''}
         </div>
       </div>
       <div className="toolbar">
@@ -4624,8 +4634,8 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
               <tr>
                 <th style={styles.th}>Employee</th>
                 <th style={styles.th}>Current contract</th>
-                <th style={{ ...styles.th, textAlign: 'right' }}>Salary</th>
-                <th style={{ ...styles.th, textAlign: 'right' }}>Fixed real cost / mo</th>
+                {canSeePay && <th style={{ ...styles.th, textAlign: 'right' }}>Salary</th>}
+                {canSeePay && <th style={{ ...styles.th, textAlign: 'right' }}>Fixed real cost / mo</th>}
                 <th style={styles.th}>Status</th>
                 <th style={styles.th}></th>
               </tr>
@@ -4634,10 +4644,10 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
               {groups.map((g) => (
                 <Fragment key={g.key}>
                   <tr className="group-row">
-                    <td style={styles.td} colSpan={3}>
+                    <td style={styles.td} colSpan={canSeePay ? 3 : 2}>
                       <strong>{g.key}</strong> <span style={{ color: colors.muted, fontSize: 12 }}>({g.rows.length}{g.ending ? ` · ${g.ending} ending or ended` : ''})</span>
                     </td>
-                    <td style={styles.tdNum}><strong>R {fmt(g.fixed)}</strong></td>
+                    {canSeePay && <td style={styles.tdNum}><strong>R {fmt(g.fixed)}</strong></td>}
                     <td style={styles.td} colSpan={2} />
                   </tr>
                   {g.rows.map(({ employee, contract }) => {
@@ -4653,8 +4663,8 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
                     <td style={{ ...styles.td, whiteSpace: 'normal' }}>
                       {contract ? <>{contract.contract_type}<span className="emp-sub">{contract.end_date ? `${contract.start_date} → ${contract.end_date}` : `since ${contract.start_date}`}</span></> : <span style={{ color: colors.muted }}>No contract on file</span>}
                     </td>
-                    <td style={styles.tdNum}>{contract?.salary ? `R ${fmt(contract.salary)}` : '—'}</td>
-                    <td style={styles.tdNum}>{fixedRealCostOf(contract) ? `R ${fmt(fixedRealCostOf(contract))}` : '—'}</td>
+                    {canSeePay && <td style={styles.tdNum}>{contract?.salary ? `R ${fmt(contract.salary)}` : '—'}</td>}
+                    {canSeePay && <td style={styles.tdNum}>{fixedRealCostOf(contract) ? `R ${fmt(fixedRealCostOf(contract))}` : '—'}</td>}
                     <td style={styles.td}><span style={styles.badge(st.tone)}>{st.text}</span></td>
                     <td style={{ ...styles.td, textAlign: 'right' }}>
                       <button style={styles.buttonGhost} onClick={(ev) => { ev.stopPropagation(); setOpenId(employee.id) }}>Open</button>
@@ -4665,13 +4675,15 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
                 </Fragment>
               ))}
               {rows.length === 0 && (
-                <tr><td style={styles.td} colSpan={6}>{employees.length === 0 ? 'No employees yet — add them on the Employees tab first.' : 'Nobody matches those filters.'}</td></tr>
+                <tr><td style={styles.td} colSpan={canSeePay ? 6 : 4}>{employees.length === 0 ? 'No employees yet — add them on the Employees tab first.' : 'Nobody matches those filters.'}</td></tr>
               )}
             </tbody>
           </table>
         </div>
         <div style={{ fontSize: 11, color: colors.muted, marginTop: 8 }}>
-          Sensitive data — HR Admin only. "Fixed real cost / mo" is salary + healthcare + pension + housing; the Staff Cost tab has the full picture. Medical aid, pension, housing and the contract history are in the contract panel — click a row.
+          {canSeePay
+            ? <>Sensitive data — HR Admin only. "Fixed real cost / mo" is salary + healthcare + pension + housing; the Staff Cost tab has the full picture. Medical aid, pension, housing and the contract history are in the contract panel — click a row.</>
+            : <>Pay figures are shown to the owner only. You can still enter pay on a new contract or replace it on an existing one — it is saved, just not shown back. Click a row for the contract.</>}
         </div>
       </div>
 
@@ -4685,6 +4697,7 @@ function ContractsTab({ companyId, employees, contracts, onAdd, onUpdate }) {
           onAdd={onAdd}
           onUpdate={onUpdate}
           onClose={() => setOpenId(null)}
+          canSeePay={canSeePay}
         />
       )}
     </>
@@ -4697,34 +4710,43 @@ const CONTRACT_TABS = [
   { id: 'history', label: 'History' },
 ]
 
-function ContractDrawer({ companyId, employee, contract, history, onAdd, onUpdate, onClose }) {
+function ContractDrawer({ companyId, employee, contract, history, onAdd, onUpdate, onClose, canSeePay = false }) {
   const [tab, setTab] = useState('current')
+  // The HR manager's form never holds a stored pay figure — even if one were
+  // somehow in the data, the boxes start blank (roles step 4, 2026-10-04).
+  const toForm = (c) => (canSeePay ? contractToForm(c) : { ...contractToForm(c), ...Object.fromEntries(CONTRACT_PAY_FIELDS.map((k) => [k, ''])) })
   // mode 'edit' amends the current row in place (2026-08-18: the Staff Cost
   // fields were added after most employees already had a contract row, so
   // filling them in must not look like everyone got a new contract that day);
   // mode 'new' inserts a fresh row, which is what a renewal or a change of
   // terms is.
   const [mode, setMode] = useState(contract ? 'edit' : 'new')
-  const [form, setForm] = useState(() => (contract ? contractToForm(contract) : BLANK_CONTRACT_FORM))
+  const [form, setForm] = useState(() => (contract ? toForm(contract) : BLANK_CONTRACT_FORM))
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
   const f = (k) => (e) => setForm((x) => ({ ...x, [k]: e.target.value }))
-  const baseline = mode === 'edit' && contract ? contractToForm(contract) : BLANK_CONTRACT_FORM
+  const baseline = mode === 'edit' && contract ? toForm(contract) : BLANK_CONTRACT_FORM
   const dirty = Object.keys(form).some((k) => String(form[k] ?? '') !== String(baseline[k] ?? ''))
   const st = contractStatus(contract)
+  // Pay boxes for someone who may not see pay (the HR manager): blank, with
+  // a hint saying what a blank does in this mode.
+  const payHint = canSeePay ? undefined : contract ? (mode === 'new' ? 'Blank = same as before' : 'Hidden — type to replace') : 'Not shown after saving'
+  const payHelp = contract
+    ? (mode === 'new' ? 'Pay is not shown to you. Boxes left blank keep the previous contract\'s figures.' : 'Pay is not shown to you. Leave blank to keep what is stored; type a figure to replace it.')
+    : 'Pay is saved but only the owner sees it afterwards.'
   const fixed = Number(form.salary || 0) + Number(form.medical_aid ? form.medical_aid_monthly_cost || 0 : 0) + Number(form.pension_fund ? form.pension_fund_monthly_cost || 0 : 0) + Number(form.housing_monthly_cost || 0)
 
   function startNew() {
     setMode('new')
     // A renewal usually keeps the benefits — prefill from the current row,
     // but start the new contract today and clear the end date.
-    setForm(contract ? { ...contractToForm(contract), start_date: todayStr(), end_date: '' } : BLANK_CONTRACT_FORM)
+    setForm(contract ? { ...toForm(contract), start_date: todayStr(), end_date: '' } : BLANK_CONTRACT_FORM)
     setTab('current'); setMsg(''); setError('')
   }
   function cancelNew() {
     setMode(contract ? 'edit' : 'new')
-    setForm(contract ? contractToForm(contract) : BLANK_CONTRACT_FORM)
+    setForm(contract ? toForm(contract) : BLANK_CONTRACT_FORM)
     setMsg(''); setError('')
   }
 
@@ -4736,14 +4758,17 @@ function ContractDrawer({ companyId, employee, contract, history, onAdd, onUpdat
     setSaving(true)
     try {
       if (mode === 'edit' && contract) {
-        const [row] = await sb.update('hr_contracts', { id: contract.id }, contractPatch(form))
+        const row = await updateContract({ contract, patch: contractPatch(form, { canSeePay }), canSeePay })
         onUpdate(row)
+        if (!canSeePay) setForm(toForm(row))  // typed pay is saved, not shown back
         setMsg('Saved — same contract row, amended in place.')
       } else {
-        const [row] = await sb.insert('hr_contracts', { company_id: companyId, employee_id: employee.id, ...contractPatch(form) })
+        const { row, warning } = await insertContract({ companyId, employeeId: employee.id, patch: contractPatch(form, { canSeePay }), canSeePay, carryPayFrom: contract?.id })
         onAdd(row)
         setMode('edit')
-        setMsg('New contract added. The previous one stays in History.')
+        if (!canSeePay) setForm(toForm(row))
+        if (warning) setError(warning)
+        else setMsg(!canSeePay && contract ? 'New contract added. Pay you left blank was carried over from the previous contract; the previous one stays in History.' : 'New contract added. The previous one stays in History.')
       }
     } catch (err) { setError(err.message) } finally { setSaving(false) }
   }
@@ -4768,7 +4793,7 @@ function ContractDrawer({ companyId, employee, contract, history, onAdd, onUpdat
   )
 
   return (
-    <Drawer title={`${employee.first_name} ${employee.last_name} — contract`} meta={meta} tabs={CONTRACT_TABS} tab={tab} onTab={setTab} onClose={onClose} footer={footer}>
+    <Drawer title={`${employee.first_name} ${employee.last_name} — contract`} meta={meta} tabs={canSeePay ? CONTRACT_TABS : CONTRACT_TABS.filter((t) => t.id !== 'cost')} tab={tab} onTab={setTab} onClose={onClose} footer={footer}>
       <form id="contract-form" onSubmit={save}>
         {tab === 'current' && (
           <>
@@ -4784,7 +4809,7 @@ function ContractDrawer({ companyId, employee, contract, history, onAdd, onUpdat
               </div>
               <div className="field"><label style={styles.label}>Start date</label><input type="date" style={styles.input} value={form.start_date} onChange={f('start_date')} /></div>
               <div className="field"><label style={styles.label}>End date</label><input type="date" style={styles.input} value={form.end_date} onChange={f('end_date')} /><div className="help">Blank if ongoing.</div></div>
-              <div className="field"><label style={styles.label}>Salary / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.salary} onChange={f('salary')} /></div>
+              <div className="field"><label style={styles.label}>Salary / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.salary} onChange={f('salary')} placeholder={payHint} />{!canSeePay && <div className="help">{payHelp}</div>}</div>
             </div>
             <div className="drawer-sect">Benefits</div>
             <div className="drawer-grid">
@@ -4794,7 +4819,7 @@ function ContractDrawer({ companyId, employee, contract, history, onAdd, onUpdat
               {form.medical_aid ? (
                 <>
                   <div className="field"><label style={styles.label}>Scheme</label><input style={styles.input} value={form.medical_aid_scheme} onChange={f('medical_aid_scheme')} /></div>
-                  <div className="field"><label style={styles.label}>Medical aid — company cost / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.medical_aid_monthly_cost} onChange={f('medical_aid_monthly_cost')} /></div>
+                  <div className="field"><label style={styles.label}>Medical aid — company cost / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.medical_aid_monthly_cost} onChange={f('medical_aid_monthly_cost')} placeholder={payHint} /></div>
                 </>
               ) : <div className="field" />}
               <div className="field"><label style={styles.label}>Pension fund</label>
@@ -4803,10 +4828,10 @@ function ContractDrawer({ companyId, employee, contract, history, onAdd, onUpdat
               {form.pension_fund ? (
                 <>
                   <div className="field"><label style={styles.label}>Fund name</label><input style={styles.input} value={form.pension_fund_name} onChange={f('pension_fund_name')} /></div>
-                  <div className="field"><label style={styles.label}>Pension — company cost / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.pension_fund_monthly_cost} onChange={f('pension_fund_monthly_cost')} /></div>
+                  <div className="field"><label style={styles.label}>Pension — company cost / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.pension_fund_monthly_cost} onChange={f('pension_fund_monthly_cost')} placeholder={payHint} /></div>
                 </>
               ) : <div className="field" />}
-              <div className="field full"><label style={styles.label}>Housing cost / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.housing_monthly_cost} onChange={f('housing_monthly_cost')} /><div className="help">Electricity, water, upkeep of staff accommodation.</div></div>
+              <div className="field full"><label style={styles.label}>Housing cost / month</label><input type="number" inputMode="decimal" style={styles.input} value={form.housing_monthly_cost} onChange={f('housing_monthly_cost')} placeholder={payHint} /><div className="help">Electricity, water, upkeep of staff accommodation.</div></div>
               <div className="field full"><label style={styles.label}>Notes</label><input style={styles.input} value={form.notes} onChange={f('notes')} /></div>
             </div>
             {mode === 'edit' && contract && (
@@ -4817,7 +4842,7 @@ function ContractDrawer({ companyId, employee, contract, history, onAdd, onUpdat
           </>
         )}
 
-        {tab === 'cost' && (
+        {tab === 'cost' && canSeePay && (
           <>
             <div className="drawer-stat"><span>Salary</span><span>R {fmt(form.salary || 0)}</span></div>
             <div className="drawer-stat"><span>Medical aid (company)</span><span>{form.medical_aid ? `R ${fmt(form.medical_aid_monthly_cost || 0)}` : '—'}</span></div>
@@ -4833,17 +4858,17 @@ function ContractDrawer({ companyId, employee, contract, history, onAdd, onUpdat
         {tab === 'history' && (
           <>
             <table style={styles.table}>
-              <thead><tr><th style={styles.th}>Contract</th><th style={styles.th}>Period</th><th style={{ ...styles.th, textAlign: 'right' }}>Salary</th><th style={{ ...styles.th, textAlign: 'right' }}>Fixed cost / mo</th></tr></thead>
+              <thead><tr><th style={styles.th}>Contract</th><th style={styles.th}>Period</th>{canSeePay && <th style={{ ...styles.th, textAlign: 'right' }}>Salary</th>}{canSeePay && <th style={{ ...styles.th, textAlign: 'right' }}>Fixed cost / mo</th>}</tr></thead>
               <tbody>
                 {history.map((c) => (
                   <tr key={c.id}>
                     <td style={styles.td}>{c.contract_type}{contract && c.id === contract.id && <> <span style={styles.badge('good')}>current</span></>}{c.notes ? <span className="emp-sub">{c.notes}</span> : null}</td>
                     <td style={styles.td}>{c.start_date} → {c.end_date || 'ongoing'}</td>
-                    <td style={styles.tdNum}>{c.salary ? `R ${fmt(c.salary)}` : '—'}</td>
-                    <td style={styles.tdNum}>{fixedRealCostOf(c) ? `R ${fmt(fixedRealCostOf(c))}` : '—'}</td>
+                    {canSeePay && <td style={styles.tdNum}>{c.salary ? `R ${fmt(c.salary)}` : '—'}</td>}
+                    {canSeePay && <td style={styles.tdNum}>{fixedRealCostOf(c) ? `R ${fmt(fixedRealCostOf(c))}` : '—'}</td>}
                   </tr>
                 ))}
-                {history.length === 0 && <tr><td style={styles.td} colSpan={4}>No contract on record yet.</td></tr>}
+                {history.length === 0 && <tr><td style={styles.td} colSpan={canSeePay ? 4 : 2}>No contract on record yet.</td></tr>}
               </tbody>
             </table>
           </>
@@ -5279,7 +5304,87 @@ function AddPaymentModal({ employeeName, currentBalance, onClose, onSave }) {
 // location that week — see staffCostEngine.js for the full calculation).
 // ---------------------------------------------------------------------------
 
-function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonuses, setBonuses }) {
+// Staff cost for someone who may not see pay per person (the HR manager):
+// department totals, added up on the server by get_staff_cost_by_department
+// (add_user_roles.sql) — no per-person figure leaves the database. Same
+// numbers the Finance Dashboard's Staff cost report shows its Finance role.
+function StaffCostByDepartment({ companyId }) {
+  const [asOf, setAsOf] = useState(todayStr())
+  const [rows, setRows] = useState(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let cancelled = false
+    setError('')
+    supabase.rpc('get_staff_cost_by_department', { p_company_id: companyId, p_as_of: asOf }).then(({ data, error: err }) => {
+      if (cancelled) return
+      if (err) { setError(/not authorized/i.test(err.message) ? 'Staff cost totals are open to the Owner, Finance and the HR manager.' : err.message); setRows([]) }
+      else setRows([...(data || [])].sort((a, b) => Number(b.total) - Number(a.total)))
+    })
+    return () => { cancelled = true }
+  }, [companyId, asOf])
+  const sum = (k) => (rows || []).reduce((s, r) => s + Number(r[k] || 0), 0)
+  return (
+    <div style={styles.card}>
+      <div style={styles.cardTitle}>Staff cost by department</div>
+      <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
+        Fixed monthly cost of active staff — salary, medical aid, pension and housing from the current contracts — added up per
+        department. Pay per person is shown to the owner only.
+      </div>
+      <div style={styles.formGrid}>
+        <div>
+          <label style={styles.label}>As of</label>
+          <input type="date" style={styles.input} value={asOf} onChange={(e) => setAsOf(e.target.value || todayStr())} />
+        </div>
+      </div>
+      {error && <div style={{ color: colors.danger, marginTop: 8 }}>{error}</div>}
+      {!rows && !error && <div style={{ color: colors.muted, marginTop: 8 }}>Loading…</div>}
+      {rows && rows.length > 0 && (
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Department</th>
+                <th style={{ ...styles.th, textAlign: 'right' }}>People</th>
+                <th style={{ ...styles.th, textAlign: 'right' }}>Salaries</th>
+                <th style={{ ...styles.th, textAlign: 'right' }}>Medical aid</th>
+                <th style={{ ...styles.th, textAlign: 'right' }}>Pension</th>
+                <th style={{ ...styles.th, textAlign: 'right' }}>Housing</th>
+                <th style={{ ...styles.th, textAlign: 'right' }}>Total / month</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.department}>
+                  <td style={styles.td}>{r.department}</td>
+                  <td style={styles.tdNum}>{r.headcount}{Number(r.with_contract) < Number(r.headcount) ? <span style={{ color: colors.muted }}> ({r.with_contract} with a contract)</span> : null}</td>
+                  <td style={styles.tdNum}>R {fmt(r.salary)}</td>
+                  <td style={styles.tdNum}>R {fmt(r.medical)}</td>
+                  <td style={styles.tdNum}>R {fmt(r.pension)}</td>
+                  <td style={styles.tdNum}>R {fmt(r.housing)}</td>
+                  <td style={styles.tdNum}><strong>R {fmt(r.total)}</strong></td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td style={styles.td}><strong>Total</strong></td>
+                <td style={styles.tdNum}><strong>{sum('headcount')}</strong></td>
+                <td style={styles.tdNum}><strong>R {fmt(sum('salary'))}</strong></td>
+                <td style={styles.tdNum}><strong>R {fmt(sum('medical'))}</strong></td>
+                <td style={styles.tdNum}><strong>R {fmt(sum('pension'))}</strong></td>
+                <td style={styles.tdNum}><strong>R {fmt(sum('housing'))}</strong></td>
+                <td style={styles.tdNum}><strong>R {fmt(sum('total'))}</strong></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+      {rows && rows.length === 0 && !error && <div style={{ color: colors.muted, marginTop: 8 }}>No active staff.</div>}
+    </div>
+  )
+}
+
+function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonuses, setBonuses, canSeePay = false }) {
   const today = todayStr()
   const defaultStart = (() => {
     const d = new Date(`${today}T00:00:00`)
@@ -5297,11 +5402,12 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonu
   const [bSaving, setBSaving] = useState(false)
   const [bError, setBError] = useState('')
 
-  async function run() {
+  async function run(bonusList = bonuses) {
+    if (!canSeePay) return  // per-person cost is for the Owner; others get department totals
     setLoading(true)
     setError('')
     try {
-      const data = await getRealStaffCostOverview({ companyId, employees, contracts, scheduleLocations, startDate, endDate })
+      const data = await getRealStaffCostOverview({ companyId, employees, contracts, scheduleLocations, startDate, endDate, bonuses: bonusList })
       setResult(data)
     } catch (e) {
       setError(e.message)
@@ -5320,27 +5426,35 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonu
     if (!bForm.employee_id || !bForm.amount) { setBError('Pick an employee and enter an amount.'); return }
     setBSaving(true)
     try {
-      const [row] = await sb.insert('hr_bonuses', {
-        company_id: companyId,
-        employee_id: bForm.employee_id,
-        bonus_date: bForm.bonus_date,
-        amount: Number(bForm.amount),
-        bonus_type: bForm.bonus_type.trim() || null,
-        note: bForm.note.trim() || null,
+      // Written with nothing handed back, then read again without the amount
+      // (hrPayData.js) — the amount column is write-only for everyone but the
+      // Owner's get_hr_pay(); the Owner's copy gets the typed amount back.
+      const row = await insertBonus({
+        companyId,
+        canSeePay,
+        bonus: {
+          employee_id: bForm.employee_id,
+          bonus_date: bForm.bonus_date,
+          amount: Number(bForm.amount),
+          bonus_type: bForm.bonus_type.trim() || null,
+          note: bForm.note.trim() || null,
+        },
       })
-      setBonuses((prev) => [row, ...prev])
+      const next = [row, ...(bonuses || [])]
+      setBonuses(next)
       setBForm({ employee_id: '', bonus_date: bForm.bonus_date, amount: '', bonus_type: '', note: '' })
-      run()  // recompute so the new bonus shows in the smoothed column
+      run(next)  // recompute so the new bonus shows in the smoothed column
     } catch (e) { setBError(e.message) }
     finally { setBSaving(false) }
   }
 
-  async function removeBonus(id) {
+  async function deleteBonus(id) {
     if (!window.confirm('Delete this bonus?')) return
     try {
-      await sb.remove('hr_bonuses', { id })
-      setBonuses((prev) => prev.filter((b) => b.id !== id))
-      run()
+      await removeBonus(id)
+      const next = (bonuses || []).filter((b) => b.id !== id)
+      setBonuses(next)
+      run(next)
     } catch (e) { alert('Could not delete: ' + e.message) }
   }
 
@@ -5361,6 +5475,8 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonu
 
   return (
     <>
+      {!canSeePay && <StaffCostByDepartment companyId={companyId} />}
+      {canSeePay && (<>
       <div style={styles.card}>
         <div style={styles.cardTitle}>Real Staff Cost</div>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
@@ -5506,12 +5622,15 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonu
           </div>
         </>
       )}
+      </>)}
 
       <div style={styles.card}>
         <div style={styles.cardTitle}>Bonuses</div>
         <div style={{ fontSize: 12, color: colors.muted, marginBottom: 10 }}>
-          Log a bonus and it feeds the Bonuses column above, spread over 12 months. Unlike uniforms and leave there
-          is nothing in the system to read a bonus from, so these have to be entered.
+          {canSeePay
+            ? <>Log a bonus and it feeds the Bonuses column above, spread over 12 months. Unlike uniforms and leave there
+          is nothing in the system to read a bonus from, so these have to be entered.</>
+            : <>Log a bonus here so it counts in the staff cost. The amount is saved but only the owner sees it afterwards.</>}
         </div>
         <div style={styles.formGrid}>
           <div>
@@ -5552,7 +5671,7 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonu
                 <th style={styles.th}>Date</th>
                 <th style={styles.th}>Employee</th>
                 <th style={styles.th}>Type</th>
-                <th style={styles.th}>Amount</th>
+                {canSeePay && <th style={styles.th}>Amount</th>}
                 <th style={styles.th}>Note</th>
                 <th style={styles.th}></th>
               </tr>
@@ -5563,15 +5682,15 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonu
                   <td style={styles.td}>{b.bonus_date}</td>
                   <td style={styles.td}>{empName(b.employee_id)}</td>
                   <td style={styles.td}>{b.bonus_type || '—'}</td>
-                  <td style={styles.tdNum}>R {fmt(b.amount)}</td>
+                  {canSeePay && <td style={styles.tdNum}>R {fmt(b.amount)}</td>}
                   <td style={styles.td}>{b.note || '—'}</td>
                   <td style={styles.td}>
-                    <button style={styles.buttonGhost} onClick={() => removeBonus(b.id)}>Delete</button>
+                    <button style={styles.buttonGhost} onClick={() => deleteBonus(b.id)}>Delete</button>
                   </td>
                 </tr>
               ))}
               {(bonuses || []).length === 0 && (
-                <tr><td style={styles.td} colSpan={6}>No bonuses logged yet.</td></tr>
+                <tr><td style={styles.td} colSpan={canSeePay ? 6 : 5}>No bonuses logged yet.</td></tr>
               )}
             </tbody>
           </table>
@@ -6274,7 +6393,7 @@ function AppraisalsTab({ companyId, companyName, employees, contracts, qualifica
               </div>
             )}
             <div style={{ fontSize: 12, marginTop: 8 }}>Pattern: {pack.pattern}{pack.extraOffDays.length ? ` · extra off days: ${pack.extraOffDays.map((d) => d.date).join(', ')}` : ''}</div>
-            {pack.bonuses.length > 0 && <div style={{ fontSize: 12, marginTop: 4 }}>Bonuses: {pack.bonuses.map((b) => `${b.date} R ${fmt(b.amount)}${b.type ? ` (${b.type})` : ''}`).join(' · ')}</div>}
+            {pack.bonuses.length > 0 && <div style={{ fontSize: 12, marginTop: 4 }}>Bonuses: {pack.bonuses.map((b) => `${b.date}${b.amount === null ? '' : ` R ${fmt(b.amount)}`}${b.type ? ` (${b.type})` : ''}`).join(' · ')}</div>}
           </div>
 
           <div style={styles.card}>

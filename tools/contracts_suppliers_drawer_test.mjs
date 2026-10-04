@@ -32,14 +32,16 @@ check('no inline add form or history table on the page', !/Add \/ view contract 
 
 const cd = fn('ContractDrawer')
 check('drawer tabs: Current contract · Cost · History', /\{ id: 'current', label: 'Current contract' \}/.test(APP) && /\{ id: 'cost', label: 'Cost' \}/.test(APP) && /\{ id: 'history', label: 'History' \}/.test(APP))
-check('edit mode amends the SAME row (sb.update), never inserts', /mode === 'edit' && contract\) \{\s*const \[row\] = await sb\.update\('hr_contracts', \{ id: contract\.id \}, contractPatch\(form\)\)/.test(cd))
-check('new mode inserts a row with company_id + employee_id', /sb\.insert\('hr_contracts', \{ company_id: companyId, employee_id: employee\.id, \.\.\.contractPatch\(form\) \}\)/.test(cd))
+// Pay privacy (2026-10-04): writes go through hrPayData.js (return=minimal,
+// read back without the pay columns) — see tools/pay_privacy_test.mjs.
+check('edit mode amends the SAME row (updateContract), never inserts', /mode === 'edit' && contract\) \{\s*const row = await updateContract\(\{ contract, patch: contractPatch\(form, \{ canSeePay \}\), canSeePay \}\)/.test(cd))
+check('new mode inserts a row with company_id + employee_id', /insertContract\(\{ companyId, employeeId: employee\.id, patch: contractPatch\(form, \{ canSeePay \}\), canSeePay, carryPayFrom: contract\?\.id \}\)/.test(cd))
 check('"+ New contract" prefills from the current one, starts today, clears the end date', /start_date: todayStr\(\), end_date: ''/.test(cd))
 check('form submits from the footer', /<form id="contract-form" onSubmit=\{save\}>/.test(cd) && /type="submit" form="contract-form"/.test(cd))
 check('end date before start is refused', /The end date is before the start date\./.test(cd))
 check('cost tab totals salary + medical + pension + housing', /Fixed real cost \/ month/.test(cd) && /Number\(form\.salary \|\| 0\) \+ Number\(form\.medical_aid \? form\.medical_aid_monthly_cost \|\| 0 : 0\)/.test(cd))
 check('history marks the current row', /c\.id === contract\.id && <> <span style=\{styles\.badge\('good'\)\}>current/.test(cd))
-check('contractPatch keeps blank numbers as null (as before)', /const num = \(v\) => \(v === '' \? null : Number\(v\)\)/.test(fn('contractPatch')))
+check('contractPatch takes its pay fields from contractPayPatch (blank = null for the Owner, untouched for HR)', /\.\.\.contractPayPatch\(form, \{ canSeePay \}\)/.test(fn('contractPatch')))
 
 const st = fn('SuppliersTab')
 check('Suppliers table has 5 columns', ths(st) === 5, String(ths(st)))

@@ -201,20 +201,15 @@ export async function getUniformCostByEmployee({ companyId }) {
   return total // employee_id -> rand issued in the last 12 months
 }
 
-export async function getBonusesByEmployee({ companyId }) {
-  const since = monthsAgoIso(MONTHS_SMOOTHED)
-  // .catch-free but tolerant: a company that hasn't run add_hr_bonuses.sql yet
-  // should still see the rest of the report rather than an error page.
-  let data = []
-  try {
-    data = await sb.select('hr_bonuses', { company_id: companyId, bonus_date: `gte.${since}` }, {})
-  } catch {
-    return {}
-  }
-
+// Bonuses come in from the app (2026-10-04, roles step 4): the amount column
+// can no longer be read with a plain select — the Owner's copy has the
+// amounts laid over from get_hr_pay() (hrPayData.js). Reading the table here
+// would now silently return no amounts and drop every bonus from the cost.
+export function getBonusesByEmployee({ bonuses, since = monthsAgoIso(MONTHS_SMOOTHED) }) {
   const total = {}
-  for (const b of data || []) {
-    if (!b.employee_id) continue
+  for (const b of bonuses || []) {
+    if (!b.employee_id || b.amount === undefined || b.amount === null) continue
+    if (String(b.bonus_date || '').slice(0, 10) < since) continue
     total[b.employee_id] = (total[b.employee_id] || 0) + Number(b.amount || 0)
   }
   return total
@@ -264,7 +259,7 @@ export async function getLeaveDaysByEmployeeAndType({ companyId }) {
   return byEmp
 }
 
-export async function getRealStaffCostOverview({ companyId, employees, contracts, scheduleLocations, startDate, endDate }) {
+export async function getRealStaffCostOverview({ companyId, employees, contracts, scheduleLocations, startDate, endDate, bonuses = [] }) {
   const [foodByWeek, bevByWeek, uniformByEmp, bonusByEmp, leaveUsedByEmp] = await Promise.all([
     getStaffIssueCostByWeek({
       companyId,
@@ -283,7 +278,7 @@ export async function getRealStaffCostOverview({ companyId, employees, contracts
       endDate,
     }),
     getUniformCostByEmployee({ companyId }),
-    getBonusesByEmployee({ companyId }),
+    getBonusesByEmployee({ bonuses }),
     getLeaveDaysByEmployee({ companyId }),
   ])
 
