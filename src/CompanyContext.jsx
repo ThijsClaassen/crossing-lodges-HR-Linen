@@ -65,7 +65,7 @@ export function CompanyProvider({ children }) {
         { data: hrAdminRows, error: hrAdminErr },
         { data: appAccessRows, error: appAccessErr },
       ] = await Promise.all([
-        supabase.from('companies').select('id, slug, name, status').order('name'),
+        supabase.from('companies').select('id, slug, name, status, member_billing_enabled').order('name'),
         supabase.from('user_companies').select('company_id, role').eq('user_id', user.id),
         supabase.from('platform_admins').select('user_id').eq('user_id', user.id).maybeSingle(),
         supabase.from('hr_admins').select('company_id').eq('user_id', user.id),
@@ -279,6 +279,8 @@ export function CompanyProvider({ children }) {
     switchCompany,
     appOn: switches.appOn,
     moduleOn: (mod) => switches.moduleOn(APP_KEY, mod),
+    // Any app's module, for the parts of this app that use another app (#561).
+    isOn: switches.moduleOn,
     noCompany,
     reload: load,
   }

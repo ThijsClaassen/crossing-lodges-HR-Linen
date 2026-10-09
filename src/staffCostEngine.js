@@ -259,9 +259,12 @@ export async function getLeaveDaysByEmployeeAndType({ companyId }) {
   return byEmp
 }
 
-export async function getRealStaffCostOverview({ companyId, employees, contracts, scheduleLocations, startDate, endDate, bonuses = [] }) {
+// withFood / withDrinks / withUniforms (#561): whether the company has the
+// Food Stock app, the Beverage Stock app and HR › Uniforms. A source it does
+// not have is not read — its part of the cost is 0, not last year's figures.
+export async function getRealStaffCostOverview({ companyId, employees, contracts, scheduleLocations, startDate, endDate, bonuses = [], withFood = true, withDrinks = true, withUniforms = true }) {
   const [foodByWeek, bevByWeek, uniformByEmp, bonusByEmp, leaveUsedByEmp] = await Promise.all([
-    getStaffIssueCostByWeek({
+    !withFood ? {} : getStaffIssueCostByWeek({
       companyId,
       issuesTable: 'food_issues',
       purchasesTable: 'food_purchases',
@@ -269,7 +272,7 @@ export async function getRealStaffCostOverview({ companyId, employees, contracts
       startDate,
       endDate,
     }),
-    getStaffIssueCostByWeek({
+    !withDrinks ? {} : getStaffIssueCostByWeek({
       companyId,
       issuesTable: 'bev_issues',
       purchasesTable: 'bev_purchases',
@@ -277,7 +280,7 @@ export async function getRealStaffCostOverview({ companyId, employees, contracts
       startDate,
       endDate,
     }),
-    getUniformCostByEmployee({ companyId }),
+    !withUniforms ? {} : getUniformCostByEmployee({ companyId }),
     getBonusesByEmployee({ bonuses }),
     getLeaveDaysByEmployee({ companyId }),
   ])

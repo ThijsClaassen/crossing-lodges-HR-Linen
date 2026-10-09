@@ -573,6 +573,7 @@ function AuthenticatedApp() {
     switchCompany,
     company,
     moduleOn,
+    isOn,
     noCompany,
 } = useCompany()
 
@@ -751,13 +752,20 @@ function AuthenticatedApp() {
       setQualifications(qualRes || [])
 
       // Guest feedback (#487). Same .catch: nothing until add_guest_feedback.sql.
-      const fbRes = await sb.select('guest_feedback', { company_id: companyId }, { order: 'stay_date.desc' }).catch(() => [])
+      // Only with the Guest feedback module (#561): it also feeds the
+      // appraisal pack, which must not quote reviews the company switched off.
+      const fbRes = moduleOn('feedback')
+        ? await sb.select('guest_feedback', { company_id: companyId }, { order: 'stay_date.desc' }).catch(() => [])
+        : []
       setGuestFeedback(fbRes || [])
       const fbSet = await sb.select('guest_feedback_settings', { company_id: companyId }, {}).catch(() => [])
       setFeedbackSettings(fbSet?.[0] || null)
       // Member reviews of staff visits (#519). Only companies with member
       // billing have any; .catch until add_member_visit_reviews.sql has run.
-      const mrRes = await sb.select('member_visit_reviews', { company_id: companyId }, { order: 'visit_date.desc' }).catch(() => [])
+      // Only while the company bills members (Finance › Members, #561).
+      const mrRes = isOn('finance', 'members')
+        ? await sb.select('member_visit_reviews', { company_id: companyId }, { order: 'visit_date.desc' }).catch(() => [])
+        : []
       setMemberReviews(mrRes || [])
       const rqRes = await sb.select('member_review_questions', { company_id: companyId }, { order: 'sort_order.asc' }).catch(() => [])
       setReviewQuestions(rqRes || [])
@@ -1353,6 +1361,11 @@ function lowStockRowsLinen(items, stock) {
 
 function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, linenItems, linenStock, linenMovements, employees, contracts, qualifications = [], onOpenQualifications }) {
   const [writeOffYear, setWriteOffYear] = useState(new Date().getFullYear())
+  // Cards for a module the company doesn't have stay off the dashboard (#561).
+  const { moduleOn } = useCompany()
+  const hasUniforms = moduleOn('uniforms')
+  const hasLinen = moduleOn('linen')
+  const hasContracts = moduleOn('contracts')
 
   const lowUniforms = useMemo(() => lowStockRows(uniformItems, uniformStockByItem), [uniformItems, uniformStockByItem])
   const lowLinen = useMemo(() => lowStockRowsLinen(linenItems, linenStock), [linenItems, linenStock])
@@ -1441,32 +1454,32 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.goldLt }}>{employees.length}</div>
             <div style={{ fontSize: 11, color: colors.muted }}>Active employees</div>
           </div>
-          <div>
+          {hasUniforms && <div>
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.goldLt }}>{lowUniforms.length}</div>
             <div style={{ fontSize: 11, color: colors.muted }}>Uniform items low on stock</div>
-          </div>
-          <div>
+          </div>}
+          {hasLinen && <div>
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.goldLt }}>{lowLinen.length}</div>
             <div style={{ fontSize: 11, color: colors.muted }}>Linen items low on stock (any lodge)</div>
-          </div>
+          </div>}
         </div>
       </div>
 
-      <div style={styles.card}>
+      {(hasUniforms || hasLinen) && <div style={styles.card}>
         <div style={styles.cardTitle}>Stock value</div>
         <div style={{ ...styles.row, gap: 20 }}>
-          <div>
+          {hasUniforms && <div>
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.goldLt }}>R {fmt(uniformStockValue)}</div>
             <div style={{ fontSize: 11, color: colors.muted }}>Uniforms (company-wide)</div>
-          </div>
-          <div>
+          </div>}
+          {hasLinen && <div>
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.goldLt }}>R {fmt(linenStockValue)}</div>
             <div style={{ fontSize: 11, color: colors.muted }}>Linen (all lodges combined)</div>
-          </div>
+          </div>}
         </div>
-      </div>
+      </div>}
 
-      <div style={styles.card}>
+      {(hasUniforms || hasLinen) && <div style={styles.card}>
         <div style={{ ...styles.row, justifyContent: 'space-between' }}>
           <div style={styles.cardTitle}>Write-offs — for budgeting</div>
           <select style={{ ...styles.smallInput, width: 90 }} value={writeOffYear} onChange={(e) => setWriteOffYear(Number(e.target.value))}>
@@ -1482,20 +1495,20 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
           this year. Both valued at the item's price.
         </div>
         <div style={{ ...styles.row, gap: 20 }}>
-          <div>
+          {hasUniforms && <div>
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.danger }}>
               {uniformWriteOffs.count} / R {fmt(uniformWriteOffs.value)}
             </div>
             <div style={{ fontSize: 11, color: colors.muted }}>Uniforms written off in {writeOffYear}</div>
-          </div>
-          <div>
+          </div>}
+          {hasLinen && <div>
             <div style={{ fontSize: 22, fontFamily: fonts.mono, color: colors.danger }}>
               {fmt(linenWriteOffs.count, 0)} / R {fmt(linenWriteOffs.value)}
             </div>
             <div style={{ fontSize: 11, color: colors.muted }}>Linen written off in {writeOffYear}</div>
-          </div>
+          </div>}
         </div>
-      </div>
+      </div>}
 
       {(qualUrgency.expired.length > 0 || qualUrgency.upcoming.length > 0) && (
         <div style={styles.card}>
@@ -1557,7 +1570,7 @@ function DashboardTab({ role, uniformItems, uniformStockByItem, uniformIssues, l
         </div>
       )}
 
-      {role === 'hradmin' && (
+      {role === 'hradmin' && hasContracts && (
         <div style={styles.card}>
           {/* Grouped by urgency rather than listed flat. The old version put
               a contract that ran out eight days ago on the same footing as
@@ -1916,7 +1929,16 @@ function ScheduleTab({
   // shared Supabase project (populated by the Finance Dashboard's Revenue
   // Importer) — read cross-app the same way staffCostEngine.js already
   // reads food_issues/bev_issues for the Staff Cost tab.
+  // Guest numbers come from the PMS link (Finance › PMS, #561). Without it
+  // there is nothing to measure cover against, so the card is left out.
+  const { isOn } = useCompany()
+  const hasBookings = isOn('finance', 'pms')
   useEffect(() => {
+    if (!hasBookings) {
+      setBookings([])
+      setBookingsLoading(false)
+      return
+    }
     const windowStart = fmtDateOnly(weeks[0].start)
     const windowEnd = fmtDateOnly(addDays(weeks[weeks.length - 1].start, 6))
     setBookingsLoading(true)
@@ -1930,7 +1952,7 @@ function ScheduleTab({
       .catch((err) => setBookingsError(err.message || 'Could not load revenue data for the coverage check.'))
       .finally(() => setBookingsLoading(false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId, weeks])
+  }, [companyId, weeks, hasBookings])
 
   const guestsMap = useMemo(() => guestsByLodgeAndDate(bookings), [bookings])
 
@@ -2096,7 +2118,7 @@ function ScheduleTab({
           schedule controls, Staffing ratios, Cycles) is folded shut by
           default via CollapsibleCard, so the tab doesn't open to a long
           scroll of stuff that's only occasionally touched. */}
-      <div style={styles.card}>
+      {hasBookings && (<div style={styles.card}>
         <div style={{ ...styles.row, justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <div style={styles.cardTitle}>Staffing coverage</div>
           <select style={{ ...styles.smallInput, width: 90 }} value={coverageLodge} onChange={(e) => setCoverageLodge(e.target.value)}>
@@ -2142,7 +2164,7 @@ function ScheduleTab({
             </table>
           </div>
         )}
-      </div>
+      </div>)}
 
       <div style={styles.card}>
         <div style={styles.cardTitle}>Headcount by position</div>
@@ -3408,7 +3430,9 @@ function EmployeeDrawer({
   const myQuals = qualifications.filter((q) => employee && q.employee_id === employee.id)
   const myIssues = uniformIssues.filter((i) => employee && i.employee_id === employee.id && i.status === 'issued')
   const contract = employee && role === 'hradmin' ? currentContract(employee.id, contracts) : null
-  const tabs = isNew ? EMPLOYEE_TABS.filter((t) => t.id === 'profile') : EMPLOYEE_TABS.map((t) =>
+  // The Uniforms tab only while the company has the Uniforms module (#561).
+  const { moduleOn } = useCompany()
+  const tabs = isNew ? EMPLOYEE_TABS.filter((t) => t.id === 'profile') : EMPLOYEE_TABS.filter((t) => t.id !== 'uniforms' || moduleOn('uniforms')).map((t) =>
     t.id === 'uniforms' ? { ...t, count: myIssues.length } : t.id === 'licences' ? { ...t, count: myQuals.length } : t)
 
   const meta = employee ? (
@@ -5439,13 +5463,17 @@ function StaffCostTab({ companyId, employees, contracts, scheduleLocations, bonu
   const [bForm, setBForm] = useState({ employee_id: '', bonus_date: todayStr(), amount: '', bonus_type: '', note: '' })
   const [bSaving, setBSaving] = useState(false)
   const [bError, setBError] = useState('')
+  // Staff meals come from the Food and Beverage Stock apps, uniform cost from
+  // the Uniforms module (#561): without them those parts are left out.
+  const { appOn, moduleOn } = useCompany()
+  const sources = { withFood: appOn('food_stock'), withDrinks: appOn('beverage'), withUniforms: moduleOn('uniforms') }
 
   async function run(bonusList = bonuses) {
     if (!canSeePay) return  // per-person cost is for the Owner; others get department totals
     setLoading(true)
     setError('')
     try {
-      const data = await getRealStaffCostOverview({ companyId, employees, contracts, scheduleLocations, startDate, endDate, bonuses: bonusList })
+      const data = await getRealStaffCostOverview({ companyId, employees, contracts, scheduleLocations, startDate, endDate, bonuses: bonusList, ...sources })
       setResult(data)
     } catch (e) {
       setError(e.message)
