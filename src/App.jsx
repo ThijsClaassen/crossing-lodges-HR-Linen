@@ -24,6 +24,7 @@ import { supabase } from './supabaseClient.js'
 import Login from './Login.jsx'
 import SetPassword from './SetPassword.jsx'
 import { CompanyProvider, useCompany } from './CompanyContext.jsx'
+import { noCompanyText, visibleTabs } from './companySwitches.js'
 import { SUPABASE_URL } from './supabaseClient'
 import { resolveCompanyLogo, logoStyle } from './companyLogo.js'
 import {
@@ -457,6 +458,23 @@ function tabsForRole(role) {
   return STAFF_TABS
 }
 
+// Which module each tab belongs to (#560 step 3). A module switched off for
+// the company on the founders' site takes its tabs out of the menu; a tab not
+// listed here is part of the app itself and always shows. Suppliers and
+// Orders serve both Uniforms and Linen, so they stay while either is on.
+const TAB_MODULE = {
+  schedule: 'schedule',
+  contracts: 'contracts',
+  staffcost: 'contracts',
+  loans: 'loans',
+  appraisals: 'appraisals',
+  feedback: 'feedback',
+  uniforms: 'uniforms',
+  linen: 'linen',
+  suppliers: ['uniforms', 'linen'],
+  orders: ['uniforms', 'linen'],
+}
+
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
@@ -554,6 +572,8 @@ function AuthenticatedApp() {
     canSeePay,
     switchCompany,
     company,
+    moduleOn,
+    noCompany,
 } = useCompany()
 
   // The client's logo if they have one, ours if they don't (2026-09-22).
@@ -913,7 +933,7 @@ function AuthenticatedApp() {
   // than before them: React requires the same hooks to run on every render
   // in the same order, so an early return can't come before a useState.
   // Android back button → this role's first page (#555).
-  const backTabs = tabsForRole(role)
+  const backTabs = visibleTabs(tabsForRole(role), TAB_MODULE, moduleOn)
   useBackToHome({ page: backTabs.some((t) => t.id === tab) ? tab : backTabs[0]?.id, setPage: setTab, home: backTabs[0]?.id })
 
   if (companyLoading) {
@@ -939,7 +959,7 @@ function AuthenticatedApp() {
     return (
       <AuthMessageScreen>
         <p style={{ marginBottom: 12 }}>
-          Your account isn't linked to any company yet. Contact your administrator to get access.
+          {noCompanyText(noCompany, 'HR & Linen')}
         </p>
         <button style={styles.button} onClick={logout}>
           Log out
@@ -948,8 +968,21 @@ function AuthenticatedApp() {
     )
   }
 
-  const TABS = tabsForRole(role)
-  const activeTab = TABS.some((t) => t.id === tab) ? tab : TABS[0].id
+  const TABS = visibleTabs(tabsForRole(role), TAB_MODULE, moduleOn)
+  const activeTab = TABS.some((t) => t.id === tab) ? tab : TABS[0]?.id
+
+  // Staff only have Uniforms and Linen; with both switched off for the
+  // company there is nothing here for them.
+  if (TABS.length === 0) {
+    return (
+      <AuthMessageScreen>
+        <p style={{ marginBottom: 12 }}>There is nothing in the HR & Linen app for your role at {companyName}.</p>
+        <button style={styles.button} onClick={logout}>
+          Log out
+        </button>
+      </AuthMessageScreen>
+    )
+  }
 
   return (
     <div className="shell">
