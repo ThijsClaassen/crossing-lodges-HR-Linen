@@ -6705,7 +6705,7 @@ function GuestRevuSyncPanel({ companyId, settings, setSettings, canRun }) {
     setSettings({ ...(settings || { company_id: companyId, column_map: {}, category_departments: {}, location_aliases: {} }), guestrevu_accounts: next })
   }
   async function call(action, extra = {}) {
-    setBusy(action); setError(''); setResult(null)
+    setBusy(extra.mode === 'full' ? 'full' : action); setError(''); setResult(null)
     try {
       const { data: { session } } = await supabase.auth.getSession()
       const res = await fetch(`${SUPABASE_URL}/functions/v1/guestrevu-sync`, {
@@ -6774,7 +6774,7 @@ function GuestRevuSyncPanel({ companyId, settings, setSettings, canRun }) {
         <div style={{ ...styles.row, gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
           <button style={styles.buttonGhost} disabled={!!busy || ids.length === 0} onClick={() => call('test')}>{busy === 'test' ? 'Testing…' : 'Test connection (writes nothing)'}</button>
           <button style={styles.button} disabled={!!busy || ids.length === 0} onClick={() => call('sync')}>{busy === 'sync' ? 'Syncing…' : 'Sync now'}</button>
-          <button style={styles.buttonGhost} disabled={!!busy || ids.length === 0} onClick={() => { if (window.confirm('Pull the complete review history from GuestRevu? Existing rows are updated, not duplicated. This can take a few runs for a big account.')) call('sync', { mode: 'full' }) }}>{busy === 'full' ? 'Pulling…' : 'Pull full history'}</button>
+          <button style={styles.buttonGhost} disabled={!!busy || ids.length === 0} onClick={() => { if (window.confirm('Pull the complete review history from GuestRevu (year by year, from 2015)? It only reads from GuestRevu. Existing rows are updated, not duplicated. A big account may need a second press to finish.')) call('sync', { mode: 'full' }) }}>{busy === 'full' ? 'Pulling…' : 'Pull full history'}</button>
         </div>
       )}
       {error && <div style={{ color: colors.danger, fontSize: 12, marginTop: 8 }}>{error}</div>}
@@ -6801,7 +6801,7 @@ function GuestRevuSyncPanel({ companyId, settings, setSettings, canRun }) {
       )}
       {result && result.action === 'sync' && (
         <div style={{ marginTop: 12, fontSize: 12 }}>
-          <strong>{result.reviews_written}</strong> reviews written from {result.reviews_read} read in {result.batches} batch{result.batches === 1 ? '' : 'es'}{result.completed ? ' — up to date.' : ' — more remain; run again or let the nightly job continue.'}
+          <strong>{result.reviews_written}</strong> reviews written from {result.reviews_read} read in {result.batches} page{result.batches === 1 ? '' : 's'}{result.completed ? ' — up to date.' : result.mode === 'full' ? ` — not finished yet; press Pull full history again to carry on${Object.values(result.detail || {}).map((d) => d.resume_from).filter(Boolean)[0] ? ` from ${Object.values(result.detail || {}).map((d) => d.resume_from).filter(Boolean)[0].slice(0, 4)}` : ''}.` : ' — stopped early; the next run picks it up.'}
           {result.error && <div style={{ color: colors.danger }}>{result.error}</div>}
           {Object.entries(result.detail || {}).map(([id, d]) => d.unmapped_questions?.length > 0 && <div key={id} style={{ color: colors.gold }}>Property {id}: unmapped questions {d.unmapped_questions.join(' · ')}</div>)}
           <div style={{ color: colors.muted }}>Reload the page to see the new weeks in the trend below.</div>
